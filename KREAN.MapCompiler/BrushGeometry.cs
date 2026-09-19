@@ -12,8 +12,8 @@ public sealed class BrushPolygon
 /// <summary>Turns a brush (a set of planes) into actual polygons by intersecting plane triples.</summary>
 public static class BrushGeometry
 {
-    const float InsideEpsilon = 0.05f;   // Quake units
-    const float MergeDistSq = 0.01f;
+    const float InsideEpsilon = 0.15f;   // Quake units — higher to avoid gaps from fp error on large coords
+    const float MergeDistSq = 0.25f; // 0.5 units
 
     public static List<BrushPolygon> Build(MapBrush brush, out Vector3 min, out Vector3 max)
     {

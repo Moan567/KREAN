@@ -288,6 +288,9 @@ void main()
         // backup GL state
         _gl.GetInteger(GetPName.Blend, out int lastBlend);
         _gl.GetInteger(GetPName.ScissorTest, out int lastScissor);
+        _gl.GetInteger(GetPName.CullFace, out int lastCull);
+        _gl.GetInteger(GetPName.DepthTest, out int lastDepth);
+        _gl.GetInteger(GetPName.BlendEquationRgb, out int lastBlendEq);
         int lastProgram = 0, lastTexture = 0, lastArrayBuffer = 0, lastVertexArray = 0;
         _gl.GetInteger(GetPName.CurrentProgram, out lastProgram);
         _gl.GetInteger(GetPName.TextureBinding2D, out lastTexture);
@@ -362,6 +365,9 @@ void main()
         _gl.BindBuffer(BufferTargetARB.ArrayBuffer, (uint)lastArrayBuffer);
         if (lastBlend == 0) _gl.Disable(EnableCap.Blend); else _gl.Enable(EnableCap.Blend);
         if (lastScissor == 0) _gl.Disable(EnableCap.ScissorTest); else _gl.Enable(EnableCap.ScissorTest);
+        if (lastCull == 0) _gl.Disable(EnableCap.CullFace); else _gl.Enable(EnableCap.CullFace);
+        if (lastDepth == 0) _gl.Disable(EnableCap.DepthTest); else _gl.Enable(EnableCap.DepthTest);
+        _gl.BlendEquation((GLEnum)lastBlendEq);
         _gl.Viewport(lastViewport[0], lastViewport[1], (uint)lastViewport[2], (uint)lastViewport[3]);
         _gl.Scissor(lastScissorBox[0], lastScissorBox[1], (uint)lastScissorBox[2], (uint)lastScissorBox[3]);
 

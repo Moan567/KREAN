@@ -75,6 +75,9 @@ void main()
         _gl = gl;
         _shader = new Shader(gl, VertexSource, FragmentSource);
         _gl.Enable(EnableCap.DepthTest);
+        _gl.Enable(EnableCap.CullFace);
+        _gl.CullFace(TriangleFace.Back);
+        _gl.FrontFace(FrontFaceDirection.Ccw);
     }
 
     public void UploadMeshes(IEnumerable<MeshData> meshes)
@@ -87,6 +90,14 @@ void main()
     public void Render(World world, int width, int height)
     {
         _gl.Viewport(0, 0, (uint)width, (uint)height);
+        _gl.Enable(EnableCap.DepthTest);
+        _gl.Enable(EnableCap.CullFace);
+        _gl.CullFace(TriangleFace.Back);
+        _gl.FrontFace(FrontFaceDirection.Ccw);
+        _gl.DepthFunc(DepthFunction.Lequal);
+        _gl.DepthMask(true);
+        _gl.Disable(EnableCap.Blend);
+        _gl.Disable(EnableCap.ScissorTest);
         _gl.ClearColor(SkyColor.X, SkyColor.Y, SkyColor.Z, 1f);
         _gl.Clear((uint)(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit));
         if (height <= 0) return;
