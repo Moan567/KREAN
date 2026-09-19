@@ -1,4 +1,5 @@
 <Solution>
+  <Project Path="KREAN.Application/KREAN.Application.csproj" Id="bb00bd60-83fd-4ec1-9b22-139ff96788c9" />
   <Project Path="KREAN.Core/KREAN.Core.csproj" />
   <Project Path="KREAN.MapCompiler/KREAN.MapCompiler.csproj" />
   <Project Path="KREAN.Runtime/KREAN.Runtime.csproj" />

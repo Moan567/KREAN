@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Numerics;
 using ImGuiNET;
@@ -96,6 +97,12 @@ public sealed class EditorUI
                 ImGui.Separator();
                 if (ImGui.MenuItem("Duplicate", "Ctrl+D", false, _session.Selected != null)) { _session.DuplicateSelected(); _recompile(); }
                 if (ImGui.MenuItem("Delete", "Del", false, _session.Selected != null)) { _session.DeleteSelected(); _recompile(); }
+                ImGui.EndMenu();
+            }
+            if (ImGui.BeginMenu("Play"))
+            {
+                if (ImGui.MenuItem("Play in Application", "F9")) LaunchPlay();
+                if (ImGui.MenuItem("Play (compile & run temp)", "F9")) LaunchPlay();
                 ImGui.EndMenu();
             }
             if (ImGui.BeginMenu("View"))
@@ -659,6 +666,69 @@ public sealed class EditorUI
             SetStatus($"Saved '{_session.FilePath}'");
         }
         catch (Exception ex) { SetStatus($"Save failed: {ex.Message}"); }
+    }
+
+    public void LaunchPlay()
+    {
+        try
+        {
+            // Ensure map is saved so Application can read it
+            string map = _session.FilePath ?? "sample.map";
+            if (_session.Dirty)
+            {
+                _session.Save(map);
+                SetStatus($"Saved '{map}' before Play");
+            }
+            else if (!File.Exists(map))
+            {
+                _session.Save(map);
+            }
+
+            // Try to locate KREAN.Application dll
+            string[] candidates = new[]
+            {
+                Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "KREAN.Application", "bin", "Debug", "net10.0", "KREAN.Application.dll")),
+                Path.GetFullPath("KREAN.Application/bin/Debug/net10.0/KREAN.Application.dll"),
+                Path.Combine(Directory.GetCurrentDirectory(), "KREAN.Application", "bin", "Debug", "net10.0", "KREAN.Application.dll"),
+                Path.Combine(AppContext.BaseDirectory, "KREAN.Application.dll"),
+            };
+            string? appDll = candidates.FirstOrDefault(File.Exists);
+            if (appDll == null)
+            {
+                // fallback: try dotnet run
+                var psi2 = new ProcessStartInfo
+                {
+                    FileName = "dotnet",
+                    Arguments = $"run --project KREAN.Application -- \"{map}\"",
+                    UseShellExecute = true,
+                    WorkingDirectory = FindSolutionRoot() ?? Directory.GetCurrentDirectory()
+                };
+                Process.Start(psi2);
+                SetStatus($"Launched via dotnet run --project KREAN.Application -- {map}");
+                return;
+            }
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = "dotnet",
+                Arguments = $"\"{appDll}\" \"{map}\"",
+                UseShellExecute = true
+            };
+            Process.Start(psi);
+            SetStatus($"Launched KREAN.Application with '{map}'");
+        }
+        catch (Exception ex) { SetStatus($"Play failed: {ex.Message}"); }
+    }
+
+    static string? FindSolutionRoot()
+    {
+        var dir = new DirectoryInfo(Directory.GetCurrentDirectory());
+        for (int i = 0; i < 6 && dir != null; i++)
+        {
+            if (File.Exists(Path.Combine(dir.FullName, "KrOn.Core.slnx"))) return dir.FullName;
+            dir = dir.Parent;
+        }
+        return null;
     }
 
     static string Fmt(float f) => f.ToString("0.##", CultureInfo.InvariantCulture);

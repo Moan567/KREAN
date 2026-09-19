@@ -232,6 +232,9 @@ sealed class MapEditorWindow : IDisposable
                     _ui.SetStatus($"Exported '{p}'");
                     break;
                 }
+            case Key.F9:
+                _ui.LaunchPlay();
+                break;
         }
     }
 
