@@ -37,10 +37,15 @@ public sealed class GameApp : IDisposable
 
     public void Run()
     {
-        // Resolve scene to queue
+        // normalize paths
+        if (_mapPath != null) _mapPath = Path.GetFullPath(_mapPath);
+        if (_scenePath != null) _scenePath = Path.GetFullPath(_scenePath);
+        // try to locate map if relative failed (editor saved to bin vs repo root mismatch)
+        _mapPath = TryResolveMapPath(_mapPath);
+        _scenePath = TryResolveScenePath(_scenePath);
+
         string? sceneToQueue = ResolveScene();
 
-        // Compile scripts before engine starts (so systems are available during Init)
         string log;
         bool hasScripts = _scripts.CompileAndLoad(_engine.World, _engine.Collision, _engine.Input, out log);
         if (hasScripts)
@@ -62,11 +67,30 @@ public sealed class GameApp : IDisposable
             _engine.QueueScene(sceneToQueue);
         else if (_mapPath != null)
         {
-            // fallback: compile map on the fly to temp scene
             var tmp = Path.Combine(Path.GetTempPath(), $"krean_{Guid.NewGuid():N}.scene.json");
-            Console.WriteLine($"[app] compiling map '{_mapPath}' -> temp scene");
-            MapCompilerService.CompileToFile(_mapPath, tmp);
-            _engine.QueueScene(tmp);
+            Console.WriteLine($"[app] compiling map '{_mapPath}' -> temp scene '{tmp}'");
+            try
+            {
+                MapCompilerService.CompileToFile(_mapPath, tmp);
+                if (!File.Exists(tmp)) throw new FileNotFoundException($"compile did not produce '{tmp}'");
+                Console.WriteLine($"[app] compiled temp scene: {new FileInfo(tmp).Length} bytes");
+                _engine.QueueScene(tmp);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[app] FAILED to compile map '{_mapPath}': {ex}");
+                // fallback: try existing scene guesses
+                var guess = _mapPath != null ? Path.ChangeExtension(_mapPath, ".scene.json") : null;
+                if (guess != null && File.Exists(guess))
+                {
+                    Console.WriteLine($"[app] falling back to existing scene '{guess}'");
+                    _engine.QueueScene(guess);
+                }
+                else if (File.Exists("sample.scene.json"))
+                    _engine.QueueScene(Path.GetFullPath("sample.scene.json"));
+                else
+                    throw;
+            }
         }
 
         Console.WriteLine($"[app] starting — map={_mapPath ?? "none"} scene={_scenePath ?? "auto"} scripts={_scriptsRoot} ({_scriptSystems.Count} systems)");
@@ -75,32 +99,67 @@ public sealed class GameApp : IDisposable
         _engine.Run();
     }
 
+    static string? TryResolveMapPath(string? p)
+    {
+        if (p == null) return null;
+        if (File.Exists(p)) return Path.GetFullPath(p);
+        // try repo root, editor bin, app bin
+        var candidates = new[]
+        {
+            Path.GetFullPath(p),
+            Path.Combine(Directory.GetCurrentDirectory(), Path.GetFileName(p)),
+            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..","..","..","..", Path.GetFileName(p))),
+            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..","..","..", "KREAN.Editor","bin","Debug","net10.0", Path.GetFileName(p))),
+            Path.Combine(Path.GetTempPath(), Path.GetFileName(p)),
+        };
+        foreach(var c in candidates) if (File.Exists(c)) { Console.WriteLine($"[app] resolved map '{p}' -> '{c}'"); return Path.GetFullPath(c); }
+        return p;
+    }
+    static string? TryResolveScenePath(string? p)
+    {
+        if (p == null) return null;
+        if (File.Exists(p)) return Path.GetFullPath(p);
+        return p;
+    }
+
     string? ResolveScene()
     {
-        if (_scenePath != null && File.Exists(_scenePath)) return _scenePath;
+        if (_scenePath != null && File.Exists(_scenePath)) return Path.GetFullPath(_scenePath);
         if (_mapPath != null && File.Exists(_mapPath))
         {
-            bool needCompile = true;
             var sceneGuess = Path.ChangeExtension(_mapPath, ".scene.json");
             if (File.Exists(sceneGuess))
             {
-                // use existing if newer than map
-                if (File.GetLastWriteTimeUtc(sceneGuess) >= File.GetLastWriteTimeUtc(_mapPath))
+                var mapTime = File.GetLastWriteTimeUtc(_mapPath);
+                var sceneTime = File.GetLastWriteTimeUtc(sceneGuess);
+                Console.WriteLine($"[app] checking scene guess '{sceneGuess}' mapTime={mapTime:o} sceneTime={sceneTime:o}");
+                if (sceneTime >= mapTime)
                 {
-                    needCompile = false;
-                    return sceneGuess;
+                    Console.WriteLine($"[app] using up-to-date scene '{sceneGuess}'");
+                    return Path.GetFullPath(sceneGuess);
                 }
+                Console.WriteLine($"[app] scene stale, will recompile map");
             }
-            if (needCompile)
+            // staleness -> let caller compile to temp; but also try to ensure we have something
+            // compile directly to sceneGuess for caching (optional) and use temp
+            try
             {
-                var outPath = sceneGuess;
-                // don't overwrite silently if Editor is expected to export; but for play we compile temp instead?
-                // compile to temp to avoid polluting
-                return null;
+                var tmp = Path.Combine(Path.GetTempPath(), $"krean_{Guid.NewGuid():N}.scene.json");
+                Console.WriteLine($"[app] recompiling stale map to temp '{tmp}'");
+                MapCompilerService.CompileToFile(_mapPath, tmp);
+                return tmp;
             }
+            catch(Exception ex)
+            {
+                Console.WriteLine($"[app] recompile failed: {ex.Message}");
+                // fallback to stale guess if exists
+                if (File.Exists(sceneGuess)) return Path.GetFullPath(sceneGuess);
+            }
+            return null;
         }
-        // try default sample
-        if (File.Exists("sample.scene.json")) return "sample.scene.json";
+        var defaultScene = Path.GetFullPath("sample.scene.json");
+        if (File.Exists(defaultScene)) return defaultScene;
+        if (File.Exists("sample.scene.json")) return Path.GetFullPath("sample.scene.json");
         return null;
     }
 

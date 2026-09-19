@@ -5,11 +5,18 @@ using KREAN.MapCompiler;
 
 namespace KREAN.Editor;
 
+public enum EditMode { Object, Brush, Face, Vertex }
+
 public sealed class MapEditorSession
 {
     public List<MapEntity> Entities { get; private set; }
     public string? FilePath { get; private set; }
     public int SelectedIndex { get; private set; } = -1;
+    public int SelectedBrushIndex { get; private set; } = -1;
+    public int SelectedFaceIndex { get; private set; } = -1;
+    public EditMode Mode { get; set; } = EditMode.Object;
+    public float GridSize { get; set; } = 8f;
+    public bool GridSnapEnabled { get; set; } = true;
     public bool Dirty { get; private set; }
 
     // undo/redo
@@ -20,6 +27,9 @@ public sealed class MapEditorSession
     {
         public List<MapEntity> Entities = null!;
         public int Selected;
+        public int SelBrush;
+        public int SelFace;
+        public EditMode Mode;
         public string? Path;
     }
 
@@ -34,9 +44,10 @@ public sealed class MapEditorSession
 
     public static MapEditorSession Load(string path)
     {
-        var entities = MapParser.ParseFile(path);
-        Console.WriteLine($"[map] loaded '{path}': {entities.Count} entities, {entities.Sum(e => e.Brushes.Count)} brushes");
-        return new MapEditorSession(entities, path);
+        var full = Path.GetFullPath(path);
+        var entities = MapParser.ParseFile(full);
+        Console.WriteLine($"[map] loaded '{full}': {entities.Count} entities, {entities.Sum(e => e.Brushes.Count)} brushes");
+        return new MapEditorSession(entities, full);
     }
 
     public static MapEditorSession CreateSample(string? path = "sample.map")
@@ -96,7 +107,7 @@ public sealed class MapEditorSession
 
     void PushUndo(string label)
     {
-        _undo.Push(new Snapshot { Entities = DeepClone(Entities), Selected = SelectedIndex, Path = FilePath });
+        _undo.Push(new Snapshot { Entities = DeepClone(Entities), Selected = SelectedIndex, SelBrush = SelectedBrushIndex, SelFace = SelectedFaceIndex, Mode = Mode, Path = FilePath });
         _redo.Clear();
         // optional: cap at 64
         if (_undo.Count > 64)
@@ -113,10 +124,13 @@ public sealed class MapEditorSession
     public void Undo()
     {
         if (!CanUndo) return;
-        _redo.Push(new Snapshot { Entities = DeepClone(Entities), Selected = SelectedIndex, Path = FilePath });
+        _redo.Push(new Snapshot { Entities = DeepClone(Entities), Selected = SelectedIndex, SelBrush = SelectedBrushIndex, SelFace = SelectedFaceIndex, Mode = Mode, Path = FilePath });
         var s = _undo.Pop();
         Entities = s.Entities;
         SelectedIndex = s.Selected;
+        SelectedBrushIndex = s.SelBrush;
+        SelectedFaceIndex = s.SelFace;
+        Mode = s.Mode;
         FilePath = s.Path;
         Dirty = true;
         Changed?.Invoke();
@@ -125,10 +139,13 @@ public sealed class MapEditorSession
     public void Redo()
     {
         if (!CanRedo) return;
-        _undo.Push(new Snapshot { Entities = DeepClone(Entities), Selected = SelectedIndex, Path = FilePath });
+        _undo.Push(new Snapshot { Entities = DeepClone(Entities), Selected = SelectedIndex, SelBrush = SelectedBrushIndex, SelFace = SelectedFaceIndex, Mode = Mode, Path = FilePath });
         var s = _redo.Pop();
         Entities = s.Entities;
         SelectedIndex = s.Selected;
+        SelectedBrushIndex = s.SelBrush;
+        SelectedFaceIndex = s.SelFace;
+        Mode = s.Mode;
         FilePath = s.Path;
         Dirty = true;
         Changed?.Invoke();
@@ -136,8 +153,46 @@ public sealed class MapEditorSession
 
     public void Select(int index)
     {
-        if (Entities.Count == 0) { SelectedIndex = -1; return; }
+        if (Entities.Count == 0) { SelectedIndex = -1; SelectedBrushIndex = -1; SelectedFaceIndex = -1; return; }
         SelectedIndex = Math.Clamp(index, 0, Entities.Count - 1);
+        SelectedBrushIndex = -1;
+        SelectedFaceIndex = -1;
+        ValidateBrushSelection();
+    }
+
+    public void SelectBrush(int entityIndex, int brushIndex, int faceIndex = -1)
+    {
+        Select(entityIndex);
+        SelectedBrushIndex = brushIndex;
+        SelectedFaceIndex = faceIndex;
+        ValidateBrushSelection();
+        Changed?.Invoke();
+    }
+
+    void ValidateBrushSelection()
+    {
+        var e = Selected;
+        if (e == null || e.Brushes.Count == 0) { SelectedBrushIndex = -1; SelectedFaceIndex = -1; return; }
+        if (SelectedBrushIndex < 0 || SelectedBrushIndex >= e.Brushes.Count) { SelectedBrushIndex = -1; SelectedFaceIndex = -1; return; }
+        var b = e.Brushes[SelectedBrushIndex];
+        if (SelectedFaceIndex < -1 || SelectedFaceIndex >= b.Faces.Count) SelectedFaceIndex = -1;
+    }
+
+    public MapBrush? SelectedBrush
+    {
+        get
+        {
+            var e = Selected;
+            if (e == null || SelectedBrushIndex < 0 || SelectedBrushIndex >= e.Brushes.Count) return null;
+            return e.Brushes[SelectedBrushIndex];
+        }
+    }
+
+    public void SetSelectedFace(int faceIdx)
+    {
+        SelectedFaceIndex = faceIdx;
+        ValidateBrushSelection();
+        Changed?.Invoke();
     }
 
     public void SelectNext(int delta = 1)
@@ -371,8 +426,177 @@ public sealed class MapEditorSession
         if (brushIndex < 0 || brushIndex >= e.Brushes.Count) return;
         PushUndo("remove brush");
         e.Brushes.RemoveAt(brushIndex);
+        if (SelectedBrushIndex == brushIndex) { SelectedBrushIndex = -1; SelectedFaceIndex = -1; }
+        else if (SelectedBrushIndex > brushIndex) SelectedBrushIndex--;
         Dirty = true;
         Changed?.Invoke();
+    }
+
+    // ---------- TrenchBroom-like brush editing ----------
+
+    public bool TranslateSelectedBrush(Vector3 deltaQuake, bool pushUndo = true)
+    {
+        var e = Selected;
+        if (e == null || SelectedBrushIndex < 0 || SelectedBrushIndex >= e.Brushes.Count) return false;
+        if (deltaQuake.LengthSquared() < 1e-6f) return false;
+        if (pushUndo) PushUndo("move brush");
+        if (GridSnapEnabled && GridSize > 0) deltaQuake = BrushManipulation.Snap(deltaQuake, GridSize);
+        BrushManipulation.Translate(e.Brushes[SelectedBrushIndex], deltaQuake);
+        Dirty = true;
+        Changed?.Invoke();
+        return true;
+    }
+
+    public bool TranslateSelectedEntity(Vector3 deltaQuake, bool pushUndo = true)
+    {
+        var e = Selected;
+        if (e == null) return false;
+        if (deltaQuake.LengthSquared() < 1e-6f) return false;
+        if (pushUndo) PushUndo("move entity");
+        if (GridSnapEnabled && GridSize > 0) deltaQuake = BrushManipulation.Snap(deltaQuake, GridSize);
+        if (e.Brushes.Count > 0)
+            BrushManipulation.TranslateEntity(e, deltaQuake);
+        else if (e.Properties.TryGetValue("origin", out var o))
+        {
+            var pos = ParseVec3(o);
+            pos += deltaQuake;
+            if (GridSnapEnabled) pos = BrushManipulation.Snap(pos, GridSize);
+            e.Properties["origin"] = $"{F(pos.X)} {F(pos.Y)} {F(pos.Z)}";
+        }
+        Dirty = true;
+        Changed?.Invoke();
+        return true;
+    }
+
+    public bool NudgeSelected(float dx, float dy, float dz)
+    {
+        var delta = new Vector3(dx, dy, dz);
+        if (Mode == EditMode.Brush && SelectedBrush != null) return TranslateSelectedBrush(delta);
+        return TranslateSelectedEntity(delta);
+    }
+
+    public bool MoveSelectedFace(float distance, bool pushUndo = true)
+    {
+        var b = SelectedBrush;
+        if (b == null || SelectedFaceIndex < 0) return false;
+        if (MathF.Abs(distance) < 1e-4f) return false;
+        if (pushUndo) PushUndo("move face");
+        if (GridSnapEnabled && GridSize > 0) distance = MathF.Round(distance / GridSize) * GridSize;
+        bool ok = BrushManipulation.MoveFace(b, SelectedFaceIndex, distance);
+        if (!ok && pushUndo) { Undo(); _redo.Clear(); }
+        else { Dirty = true; Changed?.Invoke(); }
+        return ok;
+    }
+
+    public bool SetFaceTexture(int brushIdx, int faceIdx, string texture)
+    {
+        var e = Selected;
+        if (e == null || brushIdx < 0 || brushIdx >= e.Brushes.Count) return false;
+        var b = e.Brushes[brushIdx];
+        if (faceIdx < 0 || faceIdx >= b.Faces.Count) return false;
+        PushUndo("texture");
+        b.Faces[faceIdx].Texture = texture;
+        Dirty = true;
+        Changed?.Invoke();
+        return true;
+    }
+
+    public void DuplicateBrush(int brushIdx)
+    {
+        var e = Selected;
+        if (e == null || brushIdx < 0 || brushIdx >= e.Brushes.Count) return;
+        PushUndo("duplicate brush");
+        var src = e.Brushes[brushIdx];
+        var nb = new MapBrush();
+        foreach (var f in src.Faces)
+        {
+            var nf = new MapFace { P1 = f.P1 + new Vector3(16,16,0), P2 = f.P2 + new Vector3(16,16,0), P3 = f.P3 + new Vector3(16,16,0), Texture = f.Texture, IsValve = f.IsValve, UAxis = f.UAxis, VAxis = f.VAxis, UOffset = f.UOffset, VOffset = f.VOffset, Rotation = f.Rotation, ScaleX = f.ScaleX, ScaleY = f.ScaleY };
+            nf.ComputePlane(); nb.Faces.Add(nf);
+        }
+        e.Brushes.Add(nb);
+        SelectedBrushIndex = e.Brushes.Count - 1;
+        Dirty = true;
+        Changed?.Invoke();
+    }
+
+    public bool TryPickBrush(Vector3 rayOriginQuake, Vector3 rayDirQuake, out int entityIndex, out int brushIndex, out float t, out int faceIndex)
+    {
+        entityIndex = -1; brushIndex = -1; t = float.MaxValue; faceIndex = -1;
+        bool hit = false;
+        for (int ei = 0; ei < Entities.Count; ei++)
+        {
+            var e = Entities[ei];
+            for (int bi = 0; bi < e.Brushes.Count; bi++)
+            {
+                var br = e.Brushes[bi];
+                if (BrushManipulation.RayIntersect(br, rayOriginQuake, rayDirQuake, out float bt, out _, out int bf) && bt < t && bt >= 0)
+                {
+                    t = bt; entityIndex = ei; brushIndex = bi; faceIndex = bf; hit = true;
+                }
+            }
+        }
+        // also try point entities as sphere 16 units
+        if (!hit)
+        {
+            for (int ei = 0; ei < Entities.Count; ei++)
+            {
+                var e = Entities[ei];
+                if (e.Brushes.Count > 0) continue;
+                if (!e.Properties.TryGetValue("origin", out var o)) continue;
+                var pos = ParseVec3(o);
+                // ray-sphere
+                var oc = rayOriginQuake - pos;
+                float b = Vector3.Dot(oc, rayDirQuake);
+                float c = Vector3.Dot(oc, oc) - 256f; // 16^2
+                float disc = b*b - c;
+                if (disc < 0) continue;
+                float sq = MathF.Sqrt(disc);
+                float th = -b - sq;
+                if (th < 0) th = -b + sq;
+                if (th >= 0 && th < t) { t = th; entityIndex = ei; brushIndex = -1; faceIndex = -1; hit = true; }
+            }
+        }
+        return hit;
+    }
+
+    public Vector3 GetSelectedCenter()
+    {
+        var e = Selected;
+        if (e == null) return Vector3.Zero;
+        if (SelectedBrush != null) return BrushManipulation.GetCenter(SelectedBrush);
+        if (e.Brushes.Count > 0)
+        {
+            Vector3 s = Vector3.Zero; int cnt = 0;
+            foreach (var b in e.Brushes) { s += BrushManipulation.GetCenter(b); cnt++; }
+            return cnt > 0 ? s / cnt : Vector3.Zero;
+        }
+        if (e.Properties.TryGetValue("origin", out var o)) return ParseVec3(o);
+        return Vector3.Zero;
+    }
+
+    public void GetSelectedBounds(out Vector3 min, out Vector3 max)
+    {
+        var e = Selected;
+        if (e == null) { min = max = Vector3.Zero; return; }
+        if (SelectedBrush != null) { BrushManipulation.GetBounds(SelectedBrush, out min, out max); return; }
+        if (e.Brushes.Count > 0)
+        {
+            min = new Vector3(float.MaxValue); max = new Vector3(float.MinValue);
+            foreach (var b in e.Brushes)
+            {
+                BrushManipulation.GetBounds(b, out var bmin, out var bmax);
+                if (bmin.X > bmax.X) continue;
+                min = Vector3.Min(min, bmin);
+                max = Vector3.Max(max, bmax);
+            }
+            return;
+        }
+        if (e.Properties.TryGetValue("origin", out var o))
+        {
+            var p = ParseVec3(o); min = p - new Vector3(8); max = p + new Vector3(8);
+            return;
+        }
+        min = max = Vector3.Zero;
     }
 
     // ---------- persistence ----------
@@ -381,16 +605,35 @@ public sealed class MapEditorSession
     {
         path ??= FilePath;
         if (path == null) throw new InvalidOperationException("No file path");
-        MapWriter.Write(path, Entities);
-        FilePath = path;
+        var full = Path.GetFullPath(path);
+        // ensure directory exists
+        var dir = Path.GetDirectoryName(full);
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+        MapWriter.Write(full, Entities);
+        FilePath = full;
         Dirty = false;
-        Console.WriteLine($"[editor] saved {Entities.Count} entities -> '{path}'");
+        Console.WriteLine($"[editor] saved {Entities.Count} entities -> '{full}'");
+        // keep .scene.json in sync so GameApp can use up-to-date scene without temp compile (TrenchBroom exports on save)
+        try
+        {
+            var scenePath = Path.ChangeExtension(full, ".scene.json");
+            var scene = MapCompilerService.Compile(Entities, Path.GetFileNameWithoutExtension(full));
+            KREAN.Core.Scenes.SceneSerializer.Write(scene, scenePath, true);
+            Console.WriteLine($"[editor] exported scene -> '{scenePath}' ({scene.Meshes.Count} meshes, {scene.Collision.Count} brushes)");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[editor] scene export failed: {ex.Message}");
+        }
     }
 
     public void SaveCopy(string path)
     {
-        MapWriter.Write(path, Entities);
-        Console.WriteLine($"[editor] saved copy -> '{path}'");
+        var full = Path.GetFullPath(path);
+        var dir = Path.GetDirectoryName(full);
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+        MapWriter.Write(full, Entities);
+        Console.WriteLine($"[editor] saved copy -> '{full}'");
     }
 
     // ---------- helpers ----------

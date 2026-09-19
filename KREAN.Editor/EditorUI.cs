@@ -22,7 +22,7 @@ public sealed class EditorUI
     bool _showOpenDialog;
     bool _showSaveAsDialog;
     string _fileDialogPath = "";
-    string _statusMessage = "";
+     string _statusMessage = "";
     float _statusTimer;
     Vector3 _originEdit;
     bool _originInitialized;
@@ -30,6 +30,11 @@ public sealed class EditorUI
     bool _colorInitialized;
     float _lightIntensity = 300f;
     bool _lightInitialized;
+    float _faceExtrude = 0f;
+    Vector3 _brushMoveEdit = Vector3.Zero;
+    bool _brushMoveInitialized;
+    Vector3 _boundsMinEdit, _boundsMaxEdit;
+    bool _boundsInitialized;
 
     readonly string[] _knownClasses = new[]
     {
@@ -115,22 +120,41 @@ public sealed class EditorUI
                 if (ImGui.MenuItem("Controls")) ImGui.OpenPopup("HelpPopup");
                 ImGui.EndMenu();
             }
+            if (ImGui.BeginMenu("Brush"))
+            {
+                bool obj = _session.Mode == EditMode.Object;
+                bool br = _session.Mode == EditMode.Brush;
+                bool fc = _session.Mode == EditMode.Face;
+                if (ImGui.MenuItem("Object Mode", "1", obj)) { _session.Mode = EditMode.Object; SetStatus("Mode: Object"); }
+                if (ImGui.MenuItem("Brush Mode", "2", br)) { _session.Mode = EditMode.Brush; SetStatus("Mode: Brush — click brush in viewport"); }
+                if (ImGui.MenuItem("Face Mode", "3", fc)) { _session.Mode = EditMode.Face; SetStatus("Mode: Face — scroll or drag to extrude"); }
+                ImGui.Separator();
+                if (ImGui.MenuItem("Snap Grid Toggle", "G")) { _session.GridSnapEnabled = !_session.GridSnapEnabled; SetStatus($"Grid snap {(_session.GridSnapEnabled?"ON":"OFF")}"); }
+                ImGui.TextDisabled($"Grid: {_session.GridSize}");
+                if (ImGui.MenuItem("Grid *0.5", ",")) { _session.GridSize = Math.Max(1, _session.GridSize/2); }
+                if (ImGui.MenuItem("Grid *2", ".")) { _session.GridSize = Math.Min(64, _session.GridSize*2); }
+                ImGui.EndMenu();
+            }
 
             // right side status
             string dirty = _session.Dirty ? "● Unsaved" : "Saved";
             string path = _session.FilePath ?? "(unsaved)";
-            ImGui.SetCursorPosX(ImGui.GetWindowWidth() - 420);
-            ImGui.TextDisabled($"{path}  |  {dirty}");
+            string modeStr = _session.Mode.ToString();
+            ImGui.SetCursorPosX(ImGui.GetWindowWidth() - 520);
+            ImGui.TextDisabled($"{path}  |  {dirty}  |  {modeStr}  |  Grid:{_session.GridSize:0}");
 
             if (ImGui.BeginPopup("HelpPopup"))
             {
-                ImGui.Text("KREAN Map Editor — Real visual editor");
+                ImGui.Text("KREAN Map Editor — TrenchBroom-like");
                 ImGui.Separator();
-                ImGui.BulletText("WASD + Right-drag to fly, V = noclip toggle, Esc = release mouse");
-                ImGui.BulletText("Click entity in Outliner to select, edit in Inspector");
-                ImGui.BulletText("Drag origin XYZ, pick light color, edit any key/value");
-                ImGui.BulletText("Brush entities show brush list — add/remove brushes");
-                ImGui.BulletText("Ctrl+S Save, F5 Recompile, F6 Export scene");
+                ImGui.BulletText("WASD + Right-drag to fly, V = noclip toggle");
+                ImGui.BulletText("Left-click brush in viewport to select (like TrenchBroom)");
+                ImGui.BulletText("Drag selected brush: left-drag in viewport (free plane)");
+                ImGui.BulletText("Hold X/Y/Z while dragging to lock axis, G toggles grid snap");
+                ImGui.BulletText("1/2/3 switch Object/Brush/Face mode; In Face mode scroll extrudes face, drag moves face along normal");
+                ImGui.BulletText("Arrows/PageUp-Down nudge (grid sized), ,/. grid size");
+                ImGui.BulletText("Inspector: select brush/face, edit bounds, texture, extrude");
+                ImGui.BulletText("Ctrl+S Save, Ctrl+Z/Y Undo/Redo, F5 Recompile");
                 ImGui.EndPopup();
             }
 
@@ -184,6 +208,8 @@ public sealed class EditorUI
                 _originInitialized = false;
                 _colorInitialized = false;
                 _lightInitialized = false;
+                _brushMoveInitialized = false;
+                _boundsInitialized = false;
             }
             if (ImGui.IsItemHovered() && ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left))
             {
@@ -463,6 +489,67 @@ public sealed class EditorUI
             _recompile();
         }
 
+        // ---- TrenchBroom-like brush tools ----
+        ImGui.Separator();
+        ImGui.Text("Edit Mode & Grid (TrenchBroom-like)");
+        var mode = _session.Mode;
+        if (ImGui.RadioButton("Object##mode", mode == EditMode.Object)) { _session.Mode = EditMode.Object; _recompile(); }
+        ImGui.SameLine(); if (ImGui.RadioButton("Brush##mode", mode == EditMode.Brush)) { _session.Mode = EditMode.Brush; _recompile(); }
+        ImGui.SameLine(); if (ImGui.RadioButton("Face##mode", mode == EditMode.Face)) { _session.Mode = EditMode.Face; _recompile(); }
+        ImGui.SameLine(); ImGui.TextDisabled("| Click brush in viewport, drag to move");
+        bool snap = _session.GridSnapEnabled;
+        if (ImGui.Checkbox("Grid snap", ref snap)) _session.GridSnapEnabled = snap;
+        ImGui.SameLine();
+        float gs = _session.GridSize;
+        ImGui.SetNextItemWidth(100);
+        if (ImGui.SliderFloat("##grid", ref gs, 1, 64, "Grid %.0f")) _session.GridSize = gs;
+        ImGui.SameLine(); ImGui.TextDisabled(" ,/. size");
+
+        // selection move / bounds (TrenchBroom transform)
+        _session.GetSelectedBounds(out var curMin, out var curMax);
+        bool hasBounds = curMin.X <= curMax.X;
+        if (hasBounds)
+        {
+            ImGui.Text($"Bounds: min {curMin.X:0},{curMin.Y:0},{curMin.Z:0}  max {curMax.X:0},{curMax.Y:0},{curMax.Z:0}  size {(curMax-curMin).X:0}x{(curMax-curMin).Y:0}x{(curMax-curMin).Z:0}");
+            // move by delta (like TrenchBroom inspector)
+            if (!_brushMoveInitialized) { _brushMoveEdit = Vector3.Zero; _brushMoveInitialized = true; }
+            ImGui.SetNextItemWidth(80); ImGui.DragFloat("dX##bmv", ref _brushMoveEdit.X, 1f, -4096,4096,"%.1f"); ImGui.SameLine();
+            ImGui.SetNextItemWidth(80); ImGui.DragFloat("dY##bmv", ref _brushMoveEdit.Y, 1f, -4096,4096,"%.1f"); ImGui.SameLine();
+            ImGui.SetNextItemWidth(80); ImGui.DragFloat("dZ##bmv", ref _brushMoveEdit.Z, 1f, -4096,4096,"%.1f"); ImGui.SameLine();
+            if (ImGui.Button("Move##brushMove")) { if (_brushMoveEdit.LengthSquared()>1e-6f){ if (_session.Mode==EditMode.Brush) _session.TranslateSelectedBrush(_brushMoveEdit); else _session.TranslateSelectedEntity(_brushMoveEdit); _brushMoveEdit=Vector3.Zero; _recompile(); } }
+            ImGui.SameLine(); if (ImGui.Button("Zero##bmv")) _brushMoveEdit=Vector3.Zero;
+            ImGui.SameLine(); ImGui.TextDisabled(_session.Mode==EditMode.Brush? "brush":"entity");
+
+            // resize via min/max (axis-aligned brush only — rebuilds as box like TrenchBroom)
+            if (sel.Brushes.Count>0 && _session.SelectedBrush != null && _session.SelectedBrush.Faces.Count==6)
+            {
+                if (!_boundsInitialized){ _boundsMinEdit=curMin; _boundsMaxEdit=curMax; _boundsInitialized=true; }
+                else if (!ImGui.IsAnyItemActive() && Vector3.Distance(_boundsMinEdit, curMin)>0.01f) { _boundsMinEdit=curMin; _boundsMaxEdit=curMax; }
+                ImGui.Text("Resize (box brush):");
+                ImGui.SetNextItemWidth(80); ImGui.DragFloat("minX##bnd", ref _boundsMinEdit.X,1f,-8192,8192,"%.1f"); ImGui.SameLine();
+                ImGui.SetNextItemWidth(80); ImGui.DragFloat("minY##bnd", ref _boundsMinEdit.Y,1f,-8192,8192,"%.1f"); ImGui.SameLine();
+                ImGui.SetNextItemWidth(80); ImGui.DragFloat("minZ##bnd", ref _boundsMinEdit.Z,1f,-8192,8192,"%.1f");
+                ImGui.SetNextItemWidth(80); ImGui.DragFloat("maxX##bnd", ref _boundsMaxEdit.X,1f,-8192,8192,"%.1f"); ImGui.SameLine();
+                ImGui.SetNextItemWidth(80); ImGui.DragFloat("maxY##bnd", ref _boundsMaxEdit.Y,1f,-8192,8192,"%.1f"); ImGui.SameLine();
+                ImGui.SetNextItemWidth(80); ImGui.DragFloat("maxZ##bnd", ref _boundsMaxEdit.Z,1f,-8192,8192,"%.1f"); ImGui.SameLine();
+                if (ImGui.Button("Apply Resize")) { var br=_session.SelectedBrush!; KREAN.MapCompiler.BrushManipulation.ResizeToBounds(br,_boundsMinEdit,_boundsMaxEdit); _recompile(); }
+                if (!ImGui.IsAnyItemActive()) { _boundsMinEdit=curMin; _boundsMaxEdit=curMax; }
+            }
+            else _boundsInitialized=false;
+            // face extrude in face mode
+            if (_session.Mode==EditMode.Face && _session.SelectedBrush!=null && _session.SelectedFaceIndex>=0)
+            {
+                ImGui.Text($"Face {_session.SelectedFaceIndex}: push along normal");
+                ImGui.SetNextItemWidth(120);
+                ImGui.SliderFloat("Extrude##face", ref _faceExtrude, -64, 64, "%.1f");
+                ImGui.SameLine();
+                if (ImGui.Button("Push")) { _session.MoveSelectedFace(_faceExtrude); _faceExtrude=0; _recompile(); }
+                ImGui.SameLine(); if (ImGui.Button("Pull -8")) { _session.MoveSelectedFace(-8); _recompile(); }
+                ImGui.SameLine(); if (ImGui.Button("Push +8")) { _session.MoveSelectedFace(8); _recompile(); }
+            }
+            else _faceExtrude=0;
+        }
+
         // brushes
         if (sel.Brushes.Count > 0)
         {
@@ -472,7 +559,20 @@ public sealed class EditorUI
                 for (int bi = 0; bi < sel.Brushes.Count; bi++)
                 {
                     var br = sel.Brushes[bi];
-                    if (ImGui.TreeNode($"Brush {bi}  ({br.Faces.Count} faces)"))
+                    bool isSelBrush = bi == _session.SelectedBrushIndex;
+                    ImGui.PushStyleColor(ImGuiCol.Text, isSelBrush? new Vector4(1,0.9f,0.2f,1): new Vector4(1,1,1,1));
+                    bool open = ImGui.TreeNodeEx($"Brush {bi}  ({br.Faces.Count} faces){(isSelBrush ? " <=":"")}", ImGuiTreeNodeFlags.OpenOnArrow);
+                    ImGui.PopStyleColor();
+                    ImGui.SameLine();
+                    if (ImGui.SmallButton($"Select##sel{bi}"))
+                    {
+                        _session.SelectBrush(_session.SelectedIndex, bi, -1);
+                        _recompile();
+                        _brushMoveInitialized=false; _boundsInitialized=false;
+                    }
+                    ImGui.SameLine();
+                    if (ImGui.SmallButton($"Dup##dup{bi}")) { _session.DuplicateBrush(bi); _recompile(); }
+                    if (open)
                     {
                         if (ImGui.SmallButton($"Delete brush##{bi}"))
                         {
@@ -485,16 +585,24 @@ public sealed class EditorUI
                         for (int fi = 0; fi < br.Faces.Count; fi++)
                         {
                             var f = br.Faces[fi];
+                            bool isSelFace = isSelBrush && fi == _session.SelectedFaceIndex;
                             ImGui.PushID($"b{bi}f{fi}");
+                            if (isSelFace) ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1,0.4f,0.2f,1));
                             string tex = f.Texture;
-                            ImGui.SetNextItemWidth(160);
+                            ImGui.SetNextItemWidth(140);
                             if (ImGui.InputText($"Tex##{fi}", ref tex, 64, ImGuiInputTextFlags.EnterReturnsTrue))
                             {
                                 f.Texture = tex;
                                 _recompile();
                             }
                             ImGui.SameLine();
-                            ImGui.TextDisabled($"{f.P1.X:0},{f.P1.Y:0},{f.P1.Z:0} ...");
+                            if (ImGui.Selectable($"{(isSelFace?"● ":"  ")}Face {fi}  n({f.Normal.X:0.0},{f.Normal.Y:0.0},{f.Normal.Z:0.0}) d={f.Distance:0}", isSelFace))
+                            {
+                                _session.SelectBrush(_session.SelectedIndex, bi, fi);
+                                _session.Mode = EditMode.Face;
+                                _recompile();
+                            }
+                            if (isSelFace) ImGui.PopStyleColor();
                             ImGui.PopID();
                         }
                         ImGui.TreePop();
@@ -502,17 +610,27 @@ public sealed class EditorUI
                 }
                 if (ImGui.Button("Add 64 Box Brush here"))
                 {
-                    // add at origin of selected or at 0
                     Vector3 center = Vector3.Zero;
                     if (sel.Properties.TryGetValue("origin", out var o)) center = MapEditorSession.ParseVec3Public(o);
+                    else { _session.GetSelectedBounds(out var mn, out var mx); if (mn.X<=mx.X) center = (mn+mx)*0.5f + new Vector3(64,0,0); }
                     _session.AddBoxBrushAt(center, new Vector3(32, 32, 32));
+                    _recompile();
+                }
+                ImGui.SameLine();
+                if (ImGui.Button("Add 64 Box at Camera"))
+                {
+                    _session.AddBoxBrushAt(new Vector3(0,0,32), new Vector3(32,32,32));
                     _recompile();
                 }
             }
         }
         else
         {
-            // point entity but maybe want to add brush? show button to convert? not needed
+            if (ImGui.Button("Add 64 Box Brush (make worldspawn)"))
+            {
+                _session.AddBoxBrushAt(new Vector3(0,0,32), new Vector3(32,32,32));
+                _recompile();
+            }
         }
 
         ImGui.End();
@@ -523,7 +641,8 @@ public sealed class EditorUI
         ImGui.SetNextWindowPos(new Vector2(0, viewportSize.Y - 28));
         ImGui.SetNextWindowSize(new Vector2(viewportSize.X, 28));
         ImGui.Begin("StatusBar", ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoScrollbar);
-        string status = string.IsNullOrWhiteSpace(_statusMessage) || _statusTimer <= 0 ? $"FPS {fps:0} | Cam {camPos.X:0.0},{camPos.Y:0.0},{camPos.Z:0.0} | {meshCount} meshes | {brushCount} brushes | WASD+RightDrag fly, scroll to speed" : _statusMessage;
+        string modeHelp = _session.Mode == EditMode.Face ? "Face: scroll/drag extrude, click face in inspector" : _session.Mode == EditMode.Brush ? "Brush: left-drag brush in viewport, X/Y/Z lock" : "Object: left-drag entity";
+        string status = string.IsNullOrWhiteSpace(_statusMessage) || _statusTimer <= 0 ? $"FPS {fps:0} | Cam {camPos.X:0.0},{camPos.Y:0.0},{camPos.Z:0.0} | {meshCount} meshes | {brushCount} brushes | {modeHelp} | 1/2/3 mode, G grid" : _statusMessage;
         ImGui.TextDisabled(status);
         ImGui.End();
     }
@@ -618,12 +737,10 @@ public sealed class EditorUI
         try
         {
             string p = string.IsNullOrWhiteSpace(_fileDialogPath) ? "new.map" : _fileDialogPath;
+            p = Path.GetFullPath(p);
             var empty = MapEditorSession.CreateEmpty(p);
-            // replace session contents in place rather than swapping reference (keep reference stable)
             _session.Entities.Clear();
             foreach (var e in empty.Entities) _session.Entities.Add(e);
-            // can't easily change FilePath if it's init only? but MapEditorSession.FilePath is private set with public getter? actually private set, but we can set via reflection or add method
-            // we added FilePath setter as private; need to update via Save which sets it
             _session.Save(p);
             _recompile();
             SetStatus($"Created new map '{p}'");
@@ -639,20 +756,22 @@ public sealed class EditorUI
             if (isOpen)
             {
                 if (!File.Exists(_fileDialogPath)) { SetStatus($"File not found: {_fileDialogPath}"); return; }
-                var loaded = MapEditorSession.Load(_fileDialogPath);
+                var full = Path.GetFullPath(_fileDialogPath);
+                var loaded = MapEditorSession.Load(full);
                 _session.Entities.Clear();
                 foreach (var e in loaded.Entities) _session.Entities.Add(e);
-                // update path via save trick: we need to set FilePath — do via reflection
-                typeof(MapEditorSession).GetProperty("FilePath")!.SetValue(_session, _fileDialogPath);
-                // reset selection
+                typeof(MapEditorSession).GetProperty("FilePath")!.SetValue(_session, full);
                 _session.Select(0);
                 _recompile();
-                SetStatus($"Opened '{_fileDialogPath}'");
+                SetStatus($"Opened '{full}'");
+                _fileDialogPath = full;
             }
             else
             {
-                _session.Save(_fileDialogPath);
-                SetStatus($"Saved '{_fileDialogPath}'");
+                var full = Path.GetFullPath(_fileDialogPath);
+                _session.Save(full);
+                SetStatus($"Saved '{full}'");
+                _fileDialogPath = full;
             }
         }
         catch (Exception ex) { SetStatus($"Error: {ex.Message}"); }
@@ -672,8 +791,8 @@ public sealed class EditorUI
     {
         try
         {
-            // Ensure map is saved so Application can read it
-            string map = _session.FilePath ?? "sample.map";
+            // Ensure map is saved so Application can read it — use absolute path
+            string map = _session.FilePath != null ? Path.GetFullPath(_session.FilePath) : Path.GetFullPath("sample.map");
             if (_session.Dirty)
             {
                 _session.Save(map);
@@ -682,6 +801,19 @@ public sealed class EditorUI
             else if (!File.Exists(map))
             {
                 _session.Save(map);
+            }
+            else
+            {
+                // ensure scene is fresh even if not dirty (brush edits may have been compiled to scene only)
+                try
+                {
+                    var scenePath = Path.ChangeExtension(map, ".scene.json");
+                    if (!File.Exists(scenePath) || File.GetLastWriteTimeUtc(scenePath) < File.GetLastWriteTimeUtc(map))
+                    {
+                        var sc = MapCompilerService.Compile(_session.Entities, Path.GetFileNameWithoutExtension(map));
+                        KREAN.Core.Scenes.SceneSerializer.Write(sc, scenePath, true);
+                    }
+                } catch {}
             }
 
             // Try to locate KREAN.Application dll
