@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="KREAN.Core/KREAN.Core.csproj" />
+  <Project Path="KREAN.MapCompiler/KREAN.MapCompiler.csproj" />
+  <Project Path="KREAN.Runtime/KREAN.Runtime.csproj" />
+  <Project Path="KREAN.Editor/KREAN.Editor.csproj" />
+</Solution>
