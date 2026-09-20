@@ -14,10 +14,24 @@ public sealed class MapEditorSession
     public int SelectedIndex { get; private set; } = -1;
     public int SelectedBrushIndex { get; private set; } = -1;
     public int SelectedFaceIndex { get; private set; } = -1;
-    public EditMode Mode { get; set; } = EditMode.Object;
+    public int SelectedVertexIndex { get; private set; } = -1;
+    public EditMode Mode { get; set; } = EditMode.Brush;
+    // multi-highlight (Ctrl+click) — brushes + entities (highlight only, not linked)
+    public HashSet<(int ei, int bi)> MultiSelectedBrushes { get; } = new();
+    public HashSet<int> MultiSelectedEntities { get; } = new();
+    public bool IsMultiBrushMode => MultiSelectedBrushes.Count > 0;
+    public bool IsMultiEntityMode => MultiSelectedEntities.Count > 0;
+    public bool IsMultiMode => MultiSelectedBrushes.Count > 0 || MultiSelectedEntities.Count > 0;
+    // removed linked-brush system — brushes are independent by default
+    // set true only if you explicitly want Ctrl+highlighted brushes to move together (Group)
+    public bool LinkBrushes { get; set; } = false;
     public float GridSize { get; set; } = 8f;
     public bool GridSnapEnabled { get; set; } = true;
     public bool Dirty { get; private set; }
+
+    // TrenchBroom-style brush tool defaults (Quake units, Z-up).
+    public Vector3 BrushDefaultSize { get; set; } = new Vector3(64, 64, 64);
+    public string DefaultTexture { get; set; } = "wall";
 
     // undo/redo
     readonly Stack<Snapshot> _undo = new();
@@ -29,6 +43,7 @@ public sealed class MapEditorSession
         public int Selected;
         public int SelBrush;
         public int SelFace;
+        public int SelVertex;
         public EditMode Mode;
         public string? Path;
     }
@@ -107,7 +122,7 @@ public sealed class MapEditorSession
 
     void PushUndo(string label)
     {
-        _undo.Push(new Snapshot { Entities = DeepClone(Entities), Selected = SelectedIndex, SelBrush = SelectedBrushIndex, SelFace = SelectedFaceIndex, Mode = Mode, Path = FilePath });
+        _undo.Push(new Snapshot { Entities = DeepClone(Entities), Selected = SelectedIndex, SelBrush = SelectedBrushIndex, SelFace = SelectedFaceIndex, SelVertex = SelectedVertexIndex, Mode = Mode, Path = FilePath });
         _redo.Clear();
         // optional: cap at 64
         if (_undo.Count > 64)
@@ -124,12 +139,13 @@ public sealed class MapEditorSession
     public void Undo()
     {
         if (!CanUndo) return;
-        _redo.Push(new Snapshot { Entities = DeepClone(Entities), Selected = SelectedIndex, SelBrush = SelectedBrushIndex, SelFace = SelectedFaceIndex, Mode = Mode, Path = FilePath });
+        _redo.Push(new Snapshot { Entities = DeepClone(Entities), Selected = SelectedIndex, SelBrush = SelectedBrushIndex, SelFace = SelectedFaceIndex, SelVertex = SelectedVertexIndex, Mode = Mode, Path = FilePath });
         var s = _undo.Pop();
         Entities = s.Entities;
         SelectedIndex = s.Selected;
         SelectedBrushIndex = s.SelBrush;
         SelectedFaceIndex = s.SelFace;
+        SelectedVertexIndex = s.SelVertex;
         Mode = s.Mode;
         FilePath = s.Path;
         Dirty = true;
@@ -139,12 +155,13 @@ public sealed class MapEditorSession
     public void Redo()
     {
         if (!CanRedo) return;
-        _undo.Push(new Snapshot { Entities = DeepClone(Entities), Selected = SelectedIndex, SelBrush = SelectedBrushIndex, SelFace = SelectedFaceIndex, Mode = Mode, Path = FilePath });
+        _undo.Push(new Snapshot { Entities = DeepClone(Entities), Selected = SelectedIndex, SelBrush = SelectedBrushIndex, SelFace = SelectedFaceIndex, SelVertex = SelectedVertexIndex, Mode = Mode, Path = FilePath });
         var s = _redo.Pop();
         Entities = s.Entities;
         SelectedIndex = s.Selected;
         SelectedBrushIndex = s.SelBrush;
         SelectedFaceIndex = s.SelFace;
+        SelectedVertexIndex = s.SelVertex;
         Mode = s.Mode;
         FilePath = s.Path;
         Dirty = true;
@@ -153,10 +170,11 @@ public sealed class MapEditorSession
 
     public void Select(int index)
     {
-        if (Entities.Count == 0) { SelectedIndex = -1; SelectedBrushIndex = -1; SelectedFaceIndex = -1; return; }
+        if (Entities.Count == 0) { SelectedIndex = -1; SelectedBrushIndex = -1; SelectedFaceIndex = -1; SelectedVertexIndex = -1; return; }
         SelectedIndex = Math.Clamp(index, 0, Entities.Count - 1);
         SelectedBrushIndex = -1;
         SelectedFaceIndex = -1;
+        SelectedVertexIndex = -1;
         ValidateBrushSelection();
     }
 
@@ -172,10 +190,15 @@ public sealed class MapEditorSession
     void ValidateBrushSelection()
     {
         var e = Selected;
-        if (e == null || e.Brushes.Count == 0) { SelectedBrushIndex = -1; SelectedFaceIndex = -1; return; }
-        if (SelectedBrushIndex < 0 || SelectedBrushIndex >= e.Brushes.Count) { SelectedBrushIndex = -1; SelectedFaceIndex = -1; return; }
+        if (e == null || e.Brushes.Count == 0) { SelectedBrushIndex = -1; SelectedFaceIndex = -1; SelectedVertexIndex = -1; return; }
+        if (SelectedBrushIndex < 0 || SelectedBrushIndex >= e.Brushes.Count) { SelectedBrushIndex = -1; SelectedFaceIndex = -1; SelectedVertexIndex = -1; return; }
         var b = e.Brushes[SelectedBrushIndex];
         if (SelectedFaceIndex < -1 || SelectedFaceIndex >= b.Faces.Count) SelectedFaceIndex = -1;
+        if (SelectedBrush != null && SelectedBrush.Faces.Count == 6)
+        {
+            if (SelectedVertexIndex < -1 || SelectedVertexIndex >= 8) SelectedVertexIndex = -1;
+        }
+        else SelectedVertexIndex = -1;
     }
 
     public MapBrush? SelectedBrush
@@ -201,6 +224,31 @@ public sealed class MapEditorSession
         SelectedIndex = (SelectedIndex + delta + Entities.Count) % Entities.Count;
         Changed?.Invoke();
     }
+
+    public bool ToggleMultiBrush(int ei, int bi)
+    {
+        var key = (ei, bi);
+        if (MultiSelectedBrushes.Contains(key)) { MultiSelectedBrushes.Remove(key); Changed?.Invoke(); return false; }
+        MultiSelectedBrushes.Add(key); Changed?.Invoke(); return true;
+    }
+    public void ClearMultiBrush() { if (MultiSelectedBrushes.Count>0) { MultiSelectedBrushes.Clear(); Changed?.Invoke(); } }
+    public bool IsMultiSelected(int ei, int bi) => MultiSelectedBrushes.Contains((ei, bi));
+    public void SelectBrushMulti(int ei, int bi, bool keepMulti)
+    {
+        if (!keepMulti) ClearMultiBrush();
+        // primary always
+        SelectBrush(ei, bi, -1);
+        if (keepMulti) MultiSelectedBrushes.Add((ei, bi));
+    }
+
+    public bool ToggleMultiEntity(int ei)
+    {
+        if (MultiSelectedEntities.Contains(ei)) { MultiSelectedEntities.Remove(ei); Changed?.Invoke(); return false; }
+        MultiSelectedEntities.Add(ei); Changed?.Invoke(); return true;
+    }
+    public void ClearMultiEntity() { if (MultiSelectedEntities.Count>0) { MultiSelectedEntities.Clear(); Changed?.Invoke(); } }
+    public void ClearAllMulti() { bool had = MultiSelectedBrushes.Count>0 || MultiSelectedEntities.Count>0; MultiSelectedBrushes.Clear(); MultiSelectedEntities.Clear(); if (had) Changed?.Invoke(); }
+    public bool IsMultiEntitySelected(int ei) => MultiSelectedEntities.Contains(ei);
 
     public void PrintAll()
     {
@@ -280,12 +328,58 @@ public sealed class MapEditorSession
 
     public void DeleteSelected()
     {
-        if (Selected == null) return;
-        PushUndo("delete");
-        Entities.RemoveAt(SelectedIndex);
-        if (SelectedIndex >= Entities.Count) SelectedIndex = Entities.Count - 1;
-        Dirty = true;
-        Changed?.Invoke();
+        DeleteAtSelection();
+    }
+
+    public void DeleteAtSelection()
+    {
+        var e = Selected;
+        if (e == null) return;
+
+        if (Mode == EditMode.Brush && MultiSelectedBrushes.Count > 1)
+        {
+            PushUndo("delete multi brush");
+            // group by entity
+            var byEnt = MultiSelectedBrushes.GroupBy(k => k.ei).ToDictionary(g => g.Key, g => g.Select(x => x.bi).OrderByDescending(x => x).ToList());
+            foreach (var kv in byEnt)
+            {
+                var ent = Entities[kv.Key];
+                foreach (var bi in kv.Value) if (bi >= 0 && bi < ent.Brushes.Count) ent.Brushes.RemoveAt(bi);
+            }
+            ClearMultiBrush(); SelectedBrushIndex = -1; SelectedFaceIndex = -1; SelectedVertexIndex = -1;
+            Dirty = true; Changed?.Invoke(); return;
+        }
+        if (Mode == EditMode.Brush && SelectedBrushIndex >= 0 && SelectedBrushIndex < e.Brushes.Count)
+        {
+            RemoveBrushAt(SelectedBrushIndex);
+        }
+        else if (Mode == EditMode.Face && SelectedBrush != null && SelectedFaceIndex >= 0)
+        {
+            // Face deletion: remove the face from the brush
+            // If brush would have < 4 faces, delete the whole brush
+            var br = SelectedBrush;
+            if (br.Faces.Count <= 4)
+            {
+                RemoveBrushAt(SelectedBrushIndex);
+            }
+            else
+            {
+                PushUndo("delete face");
+                br.Faces.RemoveAt(SelectedFaceIndex);
+                SelectedFaceIndex = -1;
+                Dirty = true;
+                Changed?.Invoke();
+            }
+        }
+        else
+        {
+            // Object mode or no brush selected: delete entity
+            PushUndo("delete");
+            Entities.RemoveAt(SelectedIndex);
+            if (SelectedIndex >= Entities.Count) SelectedIndex = Entities.Count - 1;
+            Dirty = true;
+            Changed?.Invoke();
+        }
     }
 
     public void DuplicateSelected()
@@ -386,8 +480,9 @@ public sealed class MapEditorSession
         Changed?.Invoke();
     }
 
-    public void AddBoxBrushAt(Vector3 quakeCenter, Vector3 quakeHalfExtents, string texture = "wall")
+    public void AddBoxBrushAt(Vector3 quakeCenter, Vector3 quakeHalfExtents, string? texture = null)
     {
+        texture ??= DefaultTexture;
         PushUndo("add brush");
         var e = Selected;
         bool makeNewEntity = e == null || e.ClassName != "worldspawn";
@@ -398,25 +493,155 @@ public sealed class MapEditorSession
             Entities.Add(e);
             SelectedIndex = Entities.Count - 1;
         }
-        var brush = new MapBrush();
-        var min = quakeCenter - quakeHalfExtents;
-        var max = quakeCenter + quakeHalfExtents;
-        AddFace(new Vector3(min.X, min.Y, min.Z), new Vector3(min.X, max.Y, min.Z), new Vector3(min.X, min.Y, max.Z));
-        AddFace(new Vector3(max.X, min.Y, min.Z), new Vector3(max.X, min.Y, max.Z), new Vector3(max.X, max.Y, min.Z));
-        AddFace(new Vector3(min.X, min.Y, min.Z), new Vector3(min.X, min.Y, max.Z), new Vector3(max.X, min.Y, min.Z));
-        AddFace(new Vector3(min.X, max.Y, min.Z), new Vector3(max.X, max.Y, min.Z), new Vector3(min.X, max.Y, max.Z));
-        AddFace(new Vector3(min.X, min.Y, min.Z), new Vector3(max.X, min.Y, min.Z), new Vector3(min.X, max.Y, min.Z));
-        AddFace(new Vector3(min.X, min.Y, max.Z), new Vector3(min.X, max.Y, max.Z), new Vector3(max.X, min.Y, max.Z));
+        var brush = BuildBoxBrush(quakeCenter - quakeHalfExtents, quakeCenter + quakeHalfExtents, texture);
         e!.Brushes.Add(brush);
+        SelectedBrushIndex = e.Brushes.Count - 1;
+        SelectedFaceIndex = -1;
         Dirty = true;
         Changed?.Invoke();
+    }
 
+    /// <summary>TrenchBroom-style: create a brush from explicit bounds (snapped, min-size enforced).
+    /// Always goes to worldspawn and becomes the active brush selection.</summary>
+    public bool CreateBoxBrush(Vector3 aQuake, Vector3 bQuake, string? texture = null)
+    {
+        texture ??= DefaultTexture;
+        var min = Vector3.Min(aQuake, bQuake);
+        var max = Vector3.Max(aQuake, bQuake);
+        if (GridSnapEnabled && GridSize > 0)
+        {
+            min = BrushManipulation.Snap(min, GridSize);
+            max = BrushManipulation.Snap(max, GridSize);
+        }
+        // enforce minimum thickness so the convex brush stays valid
+        float minEdge = Math.Max(GridSize > 0 ? GridSize : 1f, 1f);
+        if (max.X - min.X < minEdge) max.X = min.X + minEdge;
+        if (max.Y - min.Y < minEdge) max.Y = min.Y + minEdge;
+        if (max.Z - min.Z < minEdge) max.Z = min.Z + minEdge;
+
+        PushUndo("create brush");
+        int ws = Entities.FindIndex(e => e.ClassName == "worldspawn");
+        MapEntity target;
+        if (ws < 0)
+        {
+            target = new MapEntity();
+            target.Properties["classname"] = "worldspawn";
+            Entities.Insert(0, target);
+            ws = 0;
+        }
+        else target = Entities[ws];
+        var brush = BuildBoxBrush(min, max, texture);
+        target.Brushes.Add(brush);
+        SelectedIndex = ws;
+        SelectedBrushIndex = target.Brushes.Count - 1;
+        SelectedFaceIndex = -1;
+        Mode = EditMode.Brush;
+        Dirty = true;
+        Changed?.Invoke();
+        return true;
+    }
+
+    public Vector3 SnapQuake(Vector3 v)
+        => GridSnapEnabled && GridSize > 0 ? BrushManipulation.Snap(v, GridSize) : v;
+
+    public void CreateArch(Vector3 centerQuake, float innerRadius, float wallThickness, float depth, int segments, float startDeg = 0f, float sweepDeg = 180f, string? texture = null)
+    {
+        texture ??= DefaultTexture;
+        if (segments < 3) segments = 3;
+        if (segments > 32) segments = 32;
+        float outerRadius = innerRadius + wallThickness;
+        if (outerRadius <= 0 || innerRadius <= 0) return;
+        PushUndo("create arch");
+        int ws = Entities.FindIndex(e => e.ClassName == "worldspawn");
+        MapEntity target;
+        if (ws < 0) { target = new MapEntity(); target.Properties["classname"] = "worldspawn"; Entities.Insert(0, target); ws = 0; }
+        else target = Entities[ws];
+
+        float step = sweepDeg / segments * MathF.PI / 180f;
+        float start = startDeg * MathF.PI / 180f;
+        float halfDepth = depth * 0.5f;
+
+        for (int i = 0; i < segments; i++)
+        {
+            float a0 = start + i * step;
+            float a1 = start + (i + 1) * step;
+            // arch in YZ plane, thickness along X
+            float y0i = centerQuake.Y + MathF.Cos(a0) * innerRadius;
+            float z0i = centerQuake.Z + MathF.Sin(a0) * innerRadius;
+            float y0o = centerQuake.Y + MathF.Cos(a0) * outerRadius;
+            float z0o = centerQuake.Z + MathF.Sin(a0) * outerRadius;
+            float y1i = centerQuake.Y + MathF.Cos(a1) * innerRadius;
+            float z1i = centerQuake.Z + MathF.Sin(a1) * innerRadius;
+            float y1o = centerQuake.Y + MathF.Cos(a1) * outerRadius;
+            float z1o = centerQuake.Z + MathF.Sin(a1) * outerRadius;
+
+            float x0 = centerQuake.X - halfDepth;
+            float x1 = centerQuake.X + halfDepth;
+
+            // 8 vertices
+            Vector3 v0 = new(x0, y0i, z0i); // inner a0 minX
+            Vector3 v1 = new(x1, y0i, z0i); // inner a0 maxX
+            Vector3 v2 = new(x1, y0o, z0o); // outer a0 maxX
+            Vector3 v3 = new(x0, y0o, z0o); // outer a0 minX
+            Vector3 v4 = new(x0, y1i, z1i); // inner a1
+            Vector3 v5 = new(x1, y1i, z1i);
+            Vector3 v6 = new(x1, y1o, z1o);
+            Vector3 v7 = new(x0, y1o, z1o);
+
+            var br = new MapBrush();
+            Vector3 wedgeCenter = (v0 + v1 + v2 + v3 + v4 + v5 + v6 + v7) * 0.125f;
+            void AddQuad(Vector3 p1, Vector3 p2, Vector3 p3, Vector3 p4)
+            {
+                var f = new MapFace { P1 = p1, P2 = p2, P3 = p3, Texture = texture, ScaleX = 1, ScaleY = 1 };
+                f.ComputePlane();
+                // ensure outward: normal should point away from wedge center
+                Vector3 faceCenter = (p1 + p2 + p3 + p4) * 0.25f;
+                if (Vector3.Dot(f.Normal, wedgeCenter - faceCenter) > 0)
+                {
+                    (f.P2, f.P3) = (f.P3, f.P2);
+                    f.ComputePlane();
+                }
+                br.Faces.Add(f);
+            }
+            // X- thickness face
+            AddQuad(v0, v4, v7, v3);
+            // X+ thickness face
+            AddQuad(v1, v2, v6, v5);
+            // inner radial face (hole side) — normal toward center (inward)
+            AddQuad(v0, v1, v5, v4);
+            // outer radial face — normal outward
+            AddQuad(v3, v7, v6, v2);
+            // angular side faces at a0 and a1
+            AddQuad(v0, v3, v2, v1); // a0 side
+            AddQuad(v4, v5, v6, v7); // a1 side
+
+            if (!BrushManipulation.IsBrushValid(br)) continue;
+            // snap not needed for arch — keep precise
+            target.Brushes.Add(br);
+        }
+        SelectedIndex = ws;
+        SelectedBrushIndex = target.Brushes.Count - segments;
+        if (SelectedBrushIndex < 0) SelectedBrushIndex = target.Brushes.Count - 1;
+        SelectedFaceIndex = -1; SelectedVertexIndex = -1;
+        Dirty = true; Changed?.Invoke();
+    }
+
+    static MapBrush BuildBoxBrush(Vector3 min, Vector3 max, string texture)
+    {
+        var brush = new MapBrush();
         void AddFace(Vector3 p1, Vector3 p2, Vector3 p3)
         {
             var f = new MapFace { P1 = p1, P2 = p2, P3 = p3, Texture = texture, ScaleX = 1, ScaleY = 1 };
             f.ComputePlane();
             brush.Faces.Add(f);
         }
+        AddFace(new Vector3(min.X, min.Y, min.Z), new Vector3(min.X, max.Y, min.Z), new Vector3(min.X, min.Y, max.Z));
+        AddFace(new Vector3(max.X, min.Y, min.Z), new Vector3(max.X, min.Y, max.Z), new Vector3(max.X, max.Y, min.Z));
+        AddFace(new Vector3(min.X, min.Y, min.Z), new Vector3(min.X, min.Y, max.Z), new Vector3(max.X, min.Y, min.Z));
+        AddFace(new Vector3(min.X, max.Y, min.Z), new Vector3(max.X, max.Y, min.Z), new Vector3(min.X, max.Y, max.Z));
+        AddFace(new Vector3(min.X, min.Y, min.Z), new Vector3(max.X, min.Y, min.Z), new Vector3(min.X, max.Y, min.Z));
+        AddFace(new Vector3(min.X, min.Y, max.Z), new Vector3(min.X, max.Y, max.Z), new Vector3(max.X, min.Y, max.Z));
+        return brush;
     }
 
     public void RemoveBrushAt(int brushIndex)
@@ -436,11 +661,29 @@ public sealed class MapEditorSession
 
     public bool TranslateSelectedBrush(Vector3 deltaQuake, bool pushUndo = true)
     {
+        if (deltaQuake.LengthSquared() < 1e-6f) return false;
+        if (GridSnapEnabled && GridSize > 0) deltaQuake = BrushManipulation.Snap(deltaQuake, GridSize);
+        // highlighted = move together (user requested)
+        if (MultiSelectedBrushes.Count > 0)
+        {
+            var set = new HashSet<(int,int)>(MultiSelectedBrushes);
+            if (SelectedBrush != null) set.Add((SelectedIndex, SelectedBrushIndex));
+            if (set.Count > 1)
+            {
+                if (pushUndo) PushUndo("move highlighted");
+                foreach (var (ei, bi) in set)
+                {
+                    if (ei < 0 || ei >= Entities.Count) continue;
+                    var ent = Entities[ei];
+                    if (bi < 0 || bi >= ent.Brushes.Count) continue;
+                    BrushManipulation.Translate(ent.Brushes[bi], deltaQuake);
+                }
+                Dirty = true; Changed?.Invoke(); return true;
+            }
+        }
         var e = Selected;
         if (e == null || SelectedBrushIndex < 0 || SelectedBrushIndex >= e.Brushes.Count) return false;
-        if (deltaQuake.LengthSquared() < 1e-6f) return false;
         if (pushUndo) PushUndo("move brush");
-        if (GridSnapEnabled && GridSize > 0) deltaQuake = BrushManipulation.Snap(deltaQuake, GridSize);
         BrushManipulation.Translate(e.Brushes[SelectedBrushIndex], deltaQuake);
         Dirty = true;
         Changed?.Invoke();
@@ -449,11 +692,42 @@ public sealed class MapEditorSession
 
     public bool TranslateSelectedEntity(Vector3 deltaQuake, bool pushUndo = true)
     {
+        if (deltaQuake.LengthSquared() < 1e-6f) return false;
+        if (GridSnapEnabled && GridSize > 0) deltaQuake = BrushManipulation.Snap(deltaQuake, GridSize);
+        // highlighted = move together
+        if (MultiSelectedEntities.Count > 0 || MultiSelectedBrushes.Count > 0)
+        {
+            bool hasBrushMulti = MultiSelectedBrushes.Count > 0;
+            // if we have brush multi, let TranslateSelectedBrush handle it — but in Object mode we also move brushes
+            if (Mode == EditMode.Object && (MultiSelectedEntities.Count > 0 || hasBrushMulti))
+            {
+                // move all highlighted entities and also any highlighted brushes (as entities)
+                var entSet = new HashSet<int>(MultiSelectedEntities);
+                if (SelectedIndex >= 0) entSet.Add(SelectedIndex);
+                // if brush multi exists in Object mode, treat each brush's entity
+                foreach (var (ei, _) in MultiSelectedBrushes) entSet.Add(ei);
+                if (entSet.Count > 1 || hasBrushMulti)
+                {
+                    if (pushUndo) PushUndo("move highlighted");
+                    foreach (var ei in entSet)
+                    {
+                        if (ei < 0 || ei >= Entities.Count) continue;
+                        var ent = Entities[ei];
+                        if (ent.Brushes.Count > 0) BrushManipulation.TranslateEntity(ent, deltaQuake);
+                        else if (ent.Properties.TryGetValue("origin", out var o))
+                        {
+                            var pos = ParseVec3(o); pos += deltaQuake;
+                            if (GridSnapEnabled) pos = BrushManipulation.Snap(pos, GridSize);
+                            ent.Properties["origin"] = $"{F(pos.X)} {F(pos.Y)} {F(pos.Z)}";
+                        }
+                    }
+                    Dirty = true; Changed?.Invoke(); return true;
+                }
+            }
+        }
         var e = Selected;
         if (e == null) return false;
-        if (deltaQuake.LengthSquared() < 1e-6f) return false;
         if (pushUndo) PushUndo("move entity");
-        if (GridSnapEnabled && GridSize > 0) deltaQuake = BrushManipulation.Snap(deltaQuake, GridSize);
         if (e.Brushes.Count > 0)
             BrushManipulation.TranslateEntity(e, deltaQuake);
         else if (e.Properties.TryGetValue("origin", out var o))
@@ -519,6 +793,203 @@ public sealed class MapEditorSession
         Changed?.Invoke();
     }
 
+    public void DuplicateMultiBrushes()
+    {
+        if (MultiSelectedBrushes.Count == 0) { if (SelectedBrush != null) DuplicateBrush(SelectedBrushIndex); return; }
+        PushUndo("duplicate multi brush");
+        // group by entity to avoid index shift issues
+        var groups = MultiSelectedBrushes.GroupBy(k => k.ei).ToDictionary(g => g.Key, g => g.Select(x => x.bi).ToList());
+        var newSelection = new HashSet<(int ei, int bi)>();
+        foreach (var kv in groups)
+        {
+            var ent = Entities[kv.Key];
+            int before = ent.Brushes.Count;
+            foreach (var bi in kv.Value)
+            {
+                if (bi < 0 || bi >= before) continue;
+                var src = ent.Brushes[bi];
+                var nb = new MapBrush();
+                foreach (var f in src.Faces)
+                {
+                    var nf = new MapFace { P1 = f.P1 + new Vector3(16,16,0), P2 = f.P2 + new Vector3(16,16,0), P3 = f.P3 + new Vector3(16,16,0), Texture = f.Texture, IsValve = f.IsValve, UAxis = f.UAxis, VAxis = f.VAxis, UOffset = f.UOffset, VOffset = f.VOffset, Rotation = f.Rotation, ScaleX = f.ScaleX, ScaleY = f.ScaleY };
+                    nf.ComputePlane(); nb.Faces.Add(nf);
+                }
+                ent.Brushes.Add(nb);
+                newSelection.Add((kv.Key, ent.Brushes.Count - 1));
+            }
+        }
+        MultiSelectedBrushes.Clear();
+        foreach (var k in newSelection) MultiSelectedBrushes.Add(k);
+        // set primary to last duplicated
+        if (newSelection.Count > 0) { var last = newSelection.Last(); SelectedIndex = last.ei; SelectedBrushIndex = last.bi; }
+        Dirty = true; Changed?.Invoke();
+    }
+
+    public void DuplicateMultiEntities()
+    {
+        if (MultiSelectedEntities.Count == 0) return;
+        PushUndo("duplicate multi entity");
+        var sorted = MultiSelectedEntities.OrderByDescending(x => x).ToList();
+        var newIndices = new List<int>();
+        foreach (var ei in sorted)
+        {
+            if (ei < 0 || ei >= Entities.Count) continue;
+            var src = Entities[ei];
+            var clone = new MapEntity();
+            foreach (var (k, v) in src.Properties) clone.Properties[k] = v;
+            foreach (var b in src.Brushes)
+            {
+                var nb = new MapBrush();
+                foreach (var f in b.Faces)
+                {
+                    var nf = new MapFace { P1 = f.P1 + new Vector3(16,16,0), P2 = f.P2 + new Vector3(16,16,0), P3 = f.P3 + new Vector3(16,16,0), Texture = f.Texture, IsValve = f.IsValve, UAxis = f.UAxis, VAxis = f.VAxis, UOffset = f.UOffset, VOffset = f.VOffset, Rotation = f.Rotation, ScaleX = f.ScaleX, ScaleY = f.ScaleY };
+                    nf.ComputePlane(); nb.Faces.Add(nf);
+                }
+                clone.Brushes.Add(nb);
+            }
+            if (clone.Properties.TryGetValue("origin", out var o)) { var v = ParseVec3(o); v.X += 32; clone.Properties["origin"] = $"{F(v.X)} {F(v.Y)} {F(v.Z)}"; }
+            Entities.Add(clone);
+            newIndices.Add(Entities.Count - 1);
+        }
+        MultiSelectedEntities.Clear();
+        foreach (var ni in newIndices) MultiSelectedEntities.Add(ni);
+        if (newIndices.Count > 0) SelectedIndex = newIndices.Last();
+        Dirty = true; Changed?.Invoke();
+    }
+
+    public void DuplicateHighlighted()
+    {
+        if (MultiSelectedBrushes.Count > 0) DuplicateMultiBrushes();
+        else if (MultiSelectedEntities.Count > 0) DuplicateMultiEntities();
+        else if (SelectedBrush != null && Mode == EditMode.Brush) DuplicateBrush(SelectedBrushIndex);
+        else DuplicateSelected();
+    }
+
+    // ---------- TrenchBroom brush ops: flip / rotate / hollow ----------
+
+    public bool FlipSelected(GizmoAxis axis)
+    {
+        var br = SelectedBrush;
+        if (br == null) return false;
+        PushUndo($"flip {axis}");
+        BrushManipulation.GetBounds(br, out var mn, out var mx);
+        Vector3 center = (mn + mx) * 0.5f;
+        foreach (var f in br.Faces)
+        {
+            Vector3 Mirror(Vector3 p) => axis==GizmoAxis.X? new Vector3(center.X*2 - p.X, p.Y, p.Z) : axis==GizmoAxis.Y? new Vector3(p.X, center.Y*2 - p.Y, p.Z) : new Vector3(p.X, p.Y, center.Z*2 - p.Z);
+            f.P1 = Mirror(f.P1); f.P2 = Mirror(f.P2); f.P3 = Mirror(f.P3);
+            // winding flips when mirroring — swap P2/P3 to keep normal outward
+            (f.P2, f.P3) = (f.P3, f.P2);
+            f.ComputePlane();
+        }
+        Dirty = true; Changed?.Invoke(); return true;
+    }
+
+    public bool RotateSelected90()
+    {
+        var br = SelectedBrush;
+        if (br == null) return false;
+        PushUndo("rotate 90");
+        BrushManipulation.GetBounds(br, out var mn, out var mx);
+        Vector3 center = (mn + mx) * 0.5f;
+        foreach (var f in br.Faces)
+        {
+            Vector3 Rot(Vector3 p){ var d = p - center; return new Vector3(center.X - d.Y, center.Y + d.X, p.Z); }
+            f.P1 = Rot(f.P1); f.P2 = Rot(f.P2); f.P3 = Rot(f.P3);
+            f.ComputePlane();
+        }
+        Dirty = true; Changed?.Invoke(); return true;
+    }
+
+    public bool HollowSelected(float wall = 8f)
+    {
+        var br = SelectedBrush;
+        var e = Selected;
+        if (br == null || e == null) return false;
+        if (!IsBoxBrush(br)) return false;
+        BrushManipulation.GetBounds(br, out var mn, out var mx);
+        if (mx.X - mn.X <= wall*2 + 1 || mx.Y - mn.Y <= wall*2 + 1 || mx.Z - mn.Z <= wall*2 + 1) return false;
+        PushUndo("hollow");
+        // remove original
+        e.Brushes.Remove(br);
+        // 6 walls
+        Vector3 innerMin = mn + new Vector3(wall, wall, wall);
+        Vector3 innerMax = mx - new Vector3(wall, wall, wall);
+        // floor
+        e.Brushes.Add(BuildBoxBrush(new Vector3(mn.X, mn.Y, mn.Z), new Vector3(mx.X, mx.Y, innerMin.Z), br.Faces[0].Texture));
+        // ceiling
+        e.Brushes.Add(BuildBoxBrush(new Vector3(mn.X, mn.Y, innerMax.Z), new Vector3(mx.X, mx.Y, mx.Z), br.Faces[0].Texture));
+        // walls X
+        e.Brushes.Add(BuildBoxBrush(new Vector3(mn.X, mn.Y, innerMin.Z), new Vector3(innerMin.X, mx.Y, innerMax.Z), br.Faces[0].Texture));
+        e.Brushes.Add(BuildBoxBrush(new Vector3(innerMax.X, mn.Y, innerMin.Z), new Vector3(mx.X, mx.Y, innerMax.Z), br.Faces[0].Texture));
+        // walls Y
+        e.Brushes.Add(BuildBoxBrush(new Vector3(innerMin.X, mn.Y, innerMin.Z), new Vector3(innerMax.X, innerMin.Y, innerMax.Z), br.Faces[0].Texture));
+        e.Brushes.Add(BuildBoxBrush(new Vector3(innerMin.X, innerMax.Y, innerMin.Z), new Vector3(innerMax.X, mx.Y, innerMax.Z), br.Faces[0].Texture));
+        SelectedBrushIndex = -1; SelectedFaceIndex = -1; SelectedVertexIndex = -1;
+        Dirty = true; Changed?.Invoke(); return true;
+    }
+
+    // unlink = explode brushes in selected entity into separate worldspawn entities (each brush independent)
+    public bool UnlinkSelectedBrushes()
+    {
+        var e = Selected;
+        if (e == null || e.Brushes.Count <= 1) return false;
+        PushUndo("unlink brushes");
+        var brushes = e.Brushes.ToList();
+        e.Brushes.Clear();
+        e.Brushes.Add(brushes[0]);
+        for (int i = 1; i < brushes.Count; i++)
+        {
+            var ne = new MapEntity();
+            ne.Properties["classname"] = e.ClassName;
+            ne.Brushes.Add(brushes[i]);
+            Entities.Add(ne);
+        }
+        // keep selection on original, clear multi
+        ClearAllMulti();
+        SelectedBrushIndex = 0;
+        Dirty = true; Changed?.Invoke(); return true;
+    }
+
+    public bool GroupHighlightedBrushes()
+    {
+        if (MultiSelectedBrushes.Count < 2 && MultiSelectedEntities.Count < 2) return false;
+        PushUndo("group brushes");
+        // collect all brushes from multi sets
+        var allBrushes = new List<MapBrush>();
+        string tex = DefaultTexture;
+        var toRemoveBrushes = MultiSelectedBrushes.GroupBy(k => k.ei).ToDictionary(g => g.Key, g => g.Select(x => x.bi).OrderByDescending(x => x).ToList());
+        var toRemoveEnts = MultiSelectedEntities.OrderByDescending(x => x).ToList();
+        foreach (var kv in toRemoveBrushes)
+        {
+            var ent = Entities[kv.Key];
+            foreach (var bi in kv.Value) { allBrushes.Add(ent.Brushes[bi]); tex = ent.Brushes[bi].Faces.FirstOrDefault()?.Texture ?? tex; }
+        }
+        foreach (var ei in toRemoveEnts)
+        {
+            var ent = Entities[ei];
+            foreach (var b in ent.Brushes) allBrushes.Add(b);
+        }
+        // remove
+        foreach (var kv in toRemoveBrushes)
+        {
+            var ent = Entities[kv.Key];
+            foreach (var bi in kv.Value) ent.Brushes.RemoveAt(bi);
+        }
+        // remove empty entities (except keep at least one worldspawn)
+        foreach (var ei in toRemoveEnts) { if (Entities[ei].Brushes.Count == 0) Entities.RemoveAt(ei); }
+        // create new entity
+        var ne2 = new MapEntity();
+        ne2.Properties["classname"] = "worldspawn";
+        foreach (var b in allBrushes) ne2.Brushes.Add(b);
+        Entities.Add(ne2);
+        ClearAllMulti();
+        SelectedIndex = Entities.Count - 1;
+        SelectedBrushIndex = 0;
+        LinkBrushes = true; // grouped brushes move together when highlighted again
+        Dirty = true; Changed?.Invoke(); return true;
+    }
+
     public bool TryPickBrush(Vector3 rayOriginQuake, Vector3 rayDirQuake, out int entityIndex, out int brushIndex, out float t, out int faceIndex)
     {
         entityIndex = -1; brushIndex = -1; t = float.MaxValue; faceIndex = -1;
@@ -561,6 +1032,30 @@ public sealed class MapEditorSession
 
     public Vector3 GetSelectedCenter()
     {
+        if (MultiSelectedBrushes.Count > 0)
+        {
+            Vector3 s = Vector3.Zero; int cnt = 0;
+            foreach (var (ei, bi) in MultiSelectedBrushes)
+            {
+                if (ei < 0 || ei >= Entities.Count) continue;
+                var ent = Entities[ei];
+                if (bi < 0 || bi >= ent.Brushes.Count) continue;
+                s += BrushManipulation.GetCenter(ent.Brushes[bi]); cnt++;
+            }
+            if (cnt > 0) return s / cnt;
+        }
+        if (MultiSelectedEntities.Count > 0)
+        {
+            Vector3 s = Vector3.Zero; int cnt = 0;
+            foreach (var ei in MultiSelectedEntities)
+            {
+                if (ei < 0 || ei >= Entities.Count) continue;
+                var ent = Entities[ei];
+                if (ent.Brushes.Count > 0) { foreach (var b in ent.Brushes) s += BrushManipulation.GetCenter(b); cnt += ent.Brushes.Count; }
+                else if (ent.Properties.TryGetValue("origin", out var eo)) { s += ParseVec3(eo); cnt++; }
+            }
+            if (cnt > 0) return s / cnt;
+        }
         var e = Selected;
         if (e == null) return Vector3.Zero;
         if (SelectedBrush != null) return BrushManipulation.GetCenter(SelectedBrush);
@@ -570,12 +1065,41 @@ public sealed class MapEditorSession
             foreach (var b in e.Brushes) { s += BrushManipulation.GetCenter(b); cnt++; }
             return cnt > 0 ? s / cnt : Vector3.Zero;
         }
-        if (e.Properties.TryGetValue("origin", out var o)) return ParseVec3(o);
+        if (e.Properties.TryGetValue("origin", out var o2)) return ParseVec3(o2);
         return Vector3.Zero;
     }
 
     public void GetSelectedBounds(out Vector3 min, out Vector3 max)
     {
+        if (MultiSelectedBrushes.Count > 0)
+        {
+            min = new Vector3(float.MaxValue); max = new Vector3(float.MinValue);
+            foreach (var (ei, bi) in MultiSelectedBrushes)
+            {
+                if (ei < 0 || ei >= Entities.Count) continue;
+                var ent = Entities[ei];
+                if (bi < 0 || bi >= ent.Brushes.Count) continue;
+                BrushManipulation.GetBounds(ent.Brushes[bi], out var bmin, out var bmax);
+                if (bmin.X > bmax.X) continue;
+                min = Vector3.Min(min, bmin); max = Vector3.Max(max, bmax);
+            }
+            if (min.X <= max.X) return;
+        }
+        if (MultiSelectedEntities.Count > 0)
+        {
+            min = new Vector3(float.MaxValue); max = new Vector3(float.MinValue);
+            foreach (var ei in MultiSelectedEntities)
+            {
+                if (ei < 0 || ei >= Entities.Count) continue;
+                var ent = Entities[ei];
+                if (ent.Brushes.Count > 0)
+                {
+                    foreach (var b in ent.Brushes) { BrushManipulation.GetBounds(b, out var bmin, out var bmax); if (bmin.X > bmax.X) continue; min = Vector3.Min(min, bmin); max = Vector3.Max(max, bmax); }
+                }
+                else if (ent.Properties.TryGetValue("origin", out var eo)) { var p = ParseVec3(eo); min = Vector3.Min(min, p - new Vector3(8)); max = Vector3.Max(max, p + new Vector3(8)); }
+            }
+            if (min.X <= max.X) return;
+        }
         var e = Selected;
         if (e == null) { min = max = Vector3.Zero; return; }
         if (SelectedBrush != null) { BrushManipulation.GetBounds(SelectedBrush, out min, out max); return; }
@@ -591,12 +1115,192 @@ public sealed class MapEditorSession
             }
             return;
         }
-        if (e.Properties.TryGetValue("origin", out var o))
+        if (e.Properties.TryGetValue("origin", out var o2))
         {
-            var p = ParseVec3(o); min = p - new Vector3(8); max = p + new Vector3(8);
+            var p = ParseVec3(o2); min = p - new Vector3(8); max = p + new Vector3(8);
             return;
         }
         min = max = Vector3.Zero;
+    }
+
+    public Vector3 GetFaceCenter(MapBrush br, int faceIndex)
+    {
+        if (br == null || faceIndex < 0 || faceIndex >= br.Faces.Count) return BrushManipulation.GetCenter(br!);
+        var polys = BrushGeometry.Build(br, out _, out _);
+        var target = br.Faces[faceIndex];
+        foreach (var poly in polys)
+        {
+            if (poly.Face != target) continue;
+            if (poly.Vertices.Count == 0) continue;
+            Vector3 sum = Vector3.Zero;
+            foreach (var v in poly.Vertices) sum += v;
+            return sum / poly.Vertices.Count;
+        }
+        // fallback: plane point projected
+        return target.P1;
+    }
+
+    public bool TryPickFaceHandle(Vector3 rayOriginQuake, Vector3 rayDirQuake, out int faceIndex, out float t)
+    {
+        faceIndex = -1; t = float.MaxValue;
+        var br = SelectedBrush;
+        if (br == null) return false;
+        bool hit = false;
+        for (int i = 0; i < br.Faces.Count; i++)
+        {
+            var c = GetFaceCenter(br, i);
+            var oc = rayOriginQuake - c;
+            float b = Vector3.Dot(oc, rayDirQuake);
+            float c2 = Vector3.Dot(oc, oc) - 144f; // 12^2
+            float disc = b * b - c2;
+            if (disc < 0) continue;
+            float th = -b - MathF.Sqrt(disc);
+            if (th < 0) th = -b + MathF.Sqrt(disc);
+            if (th >= 0 && th < t) { t = th; faceIndex = i; hit = true; }
+        }
+        return hit;
+    }
+
+    // ---------- vertex editing (TrenchBroom / Hammer vertex tool) ----------
+
+    public bool IsBoxBrush(MapBrush? br)
+    {
+        if (br == null || br.Faces.Count != 6) return false;
+        foreach (var f in br.Faces)
+        {
+            var n = f.Normal;
+            bool ax = (MathF.Abs(MathF.Abs(n.X) - 1) < 0.01f && MathF.Abs(n.Y) < 0.01f && MathF.Abs(n.Z) < 0.01f)
+                   || (MathF.Abs(MathF.Abs(n.Y) - 1) < 0.01f && MathF.Abs(n.X) < 0.01f && MathF.Abs(n.Z) < 0.01f)
+                   || (MathF.Abs(MathF.Abs(n.Z) - 1) < 0.01f && MathF.Abs(n.X) < 0.01f && MathF.Abs(n.Y) < 0.01f);
+            if (!ax) return false;
+        }
+        return true;
+    }
+
+    public Vector3[] GetSelectedBrushCorners()
+    {
+        var br = SelectedBrush;
+        if (!IsBoxBrush(br)) return Array.Empty<Vector3>();
+        BrushManipulation.GetBounds(br, out var min, out var max);
+        return new[]
+        {
+            new Vector3(min.X, min.Y, min.Z), // 0
+            new Vector3(max.X, min.Y, min.Z), // 1
+            new Vector3(max.X, max.Y, min.Z), // 2
+            new Vector3(min.X, max.Y, min.Z), // 3
+            new Vector3(min.X, min.Y, max.Z), // 4
+            new Vector3(max.X, min.Y, max.Z), // 5
+            new Vector3(max.X, max.Y, max.Z), // 6
+            new Vector3(min.X, max.Y, max.Z), // 7
+        };
+    }
+
+    public bool TryGetSelectedVertex(out Vector3 pos)
+    {
+        pos = default;
+        if (SelectedVertexIndex < 0 || SelectedBrush == null) return false;
+        var corners = GetSelectedBrushCorners();
+        if (SelectedVertexIndex < 0 || SelectedVertexIndex >= corners.Length) return false;
+        pos = corners[SelectedVertexIndex];
+        return true;
+    }
+
+    public void SelectVertex(int brushEntityIndex, int brushIndex, int vertexIndex)
+    {
+        SelectBrush(brushEntityIndex, brushIndex, -1);
+        SelectedVertexIndex = Math.Clamp(vertexIndex, -1, 7);
+        ValidateBrushSelection();
+        Changed?.Invoke();
+    }
+
+    public bool MoveSelectedVertex(Vector3 deltaQuake, bool pushUndo = true)
+    {
+        var br = SelectedBrush;
+        if (br == null || SelectedVertexIndex < 0) return false;
+        if (!IsBoxBrush(br)) return false;
+        if (deltaQuake.LengthSquared() < 1e-6f) return false;
+        if (GridSnapEnabled && GridSize > 0) deltaQuake = BrushManipulation.Snap(deltaQuake, GridSize);
+        BrushManipulation.GetBounds(br, out var curMin, out var curMax);
+        int vi = SelectedVertexIndex;
+        // bit 0 = maxX, bit1 = maxY, bit2 = maxZ
+        Vector3 newMin = curMin, newMax = curMax;
+        if ((vi & 1) != 0) newMax.X += deltaQuake.X; else newMin.X += deltaQuake.X;
+        if ((vi & 2) != 0) newMax.Y += deltaQuake.Y; else newMin.Y += deltaQuake.Y;
+        if ((vi & 4) != 0) newMax.Z += deltaQuake.Z; else newMin.Z += deltaQuake.Z;
+        // order + min thickness
+        float minEdge = Math.Max(GridSize > 0 ? GridSize : 1f, 1f);
+        if (newMax.X - newMin.X < minEdge || newMax.Y - newMin.Y < minEdge || newMax.Z - newMin.Z < minEdge) return false;
+        if (GridSnapEnabled && GridSize > 0)
+        {
+            newMin = BrushManipulation.Snap(newMin, GridSize);
+            newMax = BrushManipulation.Snap(newMax, GridSize);
+            if (newMax.X - newMin.X < minEdge || newMax.Y - newMin.Y < minEdge || newMax.Z - newMin.Z < minEdge) return false;
+        }
+        if (pushUndo) PushUndo("move vertex");
+        BrushManipulation.ResizeToBounds(br, newMin, newMax);
+        // keep same vertex selected — it stays at the moved corner
+        Dirty = true;
+        Changed?.Invoke();
+        return true;
+    }
+
+    public bool TryPickVertex(Vector3 rayOriginQuake, Vector3 rayDirQuake, out int vertexIndex, out float t)
+    {
+        vertexIndex = -1; t = float.MaxValue;
+        var br = SelectedBrush;
+        if (br == null || !IsBoxBrush(br)) return false;
+        var corners = GetSelectedBrushCorners();
+        float best = float.MaxValue;
+        for (int i = 0; i < corners.Length; i++)
+        {
+            var p = corners[i];
+            // ray-sphere 10 units
+            var oc = rayOriginQuake - p;
+            float b = Vector3.Dot(oc, rayDirQuake);
+            float c = Vector3.Dot(oc, oc) - 100f; // 10^2
+            float disc = b * b - c;
+            if (disc < 0) continue;
+            float th = -b - MathF.Sqrt(disc);
+            if (th < 0) th = -b + MathF.Sqrt(disc);
+            if (th >= 0 && th < best) { best = th; vertexIndex = i; }
+        }
+        if (vertexIndex >= 0) { t = best; return true; }
+        return false;
+    }
+
+    // Extrude selected face(s) via world-axis delta — finds most aligned face normal.
+    public bool ExtrudeSelectedBrush(Vector3 deltaQuake, bool pushUndo = true)
+    {
+        var br = SelectedBrush;
+        if (br == null) return false;
+        if (deltaQuake.LengthSquared() < 1e-6f) return false;
+        if (GridSnapEnabled && GridSize > 0) deltaQuake = BrushManipulation.Snap(deltaQuake, GridSize);
+        // prefer already-selected face; otherwise pick dominant axis
+        if (SelectedFaceIndex >= 0)
+            return MoveSelectedFace(Vector3.Dot(deltaQuake, br.Faces[SelectedFaceIndex].Normal), pushUndo);
+        // pick face whose normal best aligns with delta
+        float best = -2f; int bestIdx = -1;
+        for (int i = 0; i < br.Faces.Count; i++) { float d = Vector3.Dot(Vector3.Normalize(deltaQuake), br.Faces[i].Normal); if (d > best) { best = d; bestIdx = i; } }
+        if (bestIdx >= 0 && best > 0.3f)
+        {
+            int prev = SelectedFaceIndex;
+            SelectedFaceIndex = bestIdx;
+            bool ok = MoveSelectedFace(Vector3.Dot(deltaQuake, br.Faces[bestIdx].Normal), pushUndo);
+            if (!ok) SelectedFaceIndex = prev;
+            return ok;
+        }
+        // fallback: resize AABB along delta (pushes the positive side)
+        BrushManipulation.GetBounds(br, out var mn, out var mx);
+        Vector3 newMin = mn, newMax = mx;
+        if (deltaQuake.X > 0) newMax.X += deltaQuake.X; else if (deltaQuake.X < 0) newMin.X += deltaQuake.X;
+        if (deltaQuake.Y > 0) newMax.Y += deltaQuake.Y; else if (deltaQuake.Y < 0) newMin.Y += deltaQuake.Y;
+        if (deltaQuake.Z > 0) newMax.Z += deltaQuake.Z; else if (deltaQuake.Z < 0) newMin.Z += deltaQuake.Z;
+        float minEdge = Math.Max(GridSize, 1f);
+        if (newMax.X - newMin.X < minEdge || newMax.Y - newMin.Y < minEdge || newMax.Z - newMin.Z < minEdge) return false;
+        if (pushUndo) PushUndo("extrude brush");
+        BrushManipulation.ResizeToBounds(br, newMin, newMax);
+        Dirty = true; Changed?.Invoke();
+        return true;
     }
 
     // ---------- persistence ----------
