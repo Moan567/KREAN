@@ -61,6 +61,7 @@ public sealed unsafe class Shader : IDisposable
     public void Set(string name, Matrix4x4 m) => _gl.UniformMatrix4(Location(name), 1, false, (float*)&m);
     public void Set(string name, Vector3 v) => _gl.Uniform3(Location(name), v.X, v.Y, v.Z);
     public void Set(string name, float f) => _gl.Uniform1(Location(name), f);
+    public void Set(string name, int i) => _gl.Uniform1(Location(name), i);
 
     public void Dispose() => _gl.DeleteProgram(Handle);
 }

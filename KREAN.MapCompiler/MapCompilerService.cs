@@ -53,11 +53,24 @@ public static class MapCompilerService
             float yaw = ReadYaw(props);
 
             var transform = Transform.Identity;
+            // handle model scale property
+            if (props.TryGetValue("scale", out var sc) || props.TryGetValue("modelscale", out sc) || props.TryGetValue("_scale", out sc))
+                if(float.TryParse(sc, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var scaleVal) && scaleVal>0.01f)
+                    transform.Scale = new System.Numerics.Vector3(scaleVal, scaleVal, scaleVal);
             if (!hasBrushes)
             {
                 if (props.TryGetValue("origin", out var origin))
                     transform.Position = SpaceConvert.ToEngine(ParseVec3(origin), s);
                 transform.Rotation = Quaternion.CreateFromAxisAngle(Vector3.UnitY, yaw * Units.Deg2Rad);
+                // also handle pitch/roll via angles
+                if (props.TryGetValue("angles", out var angStr))
+                {
+                    var ang = ParseVec3(angStr);
+                    var qx = Quaternion.CreateFromAxisAngle(Vector3.UnitX, -ang.X * Units.Deg2Rad);
+                    var qy = Quaternion.CreateFromAxisAngle(Vector3.UnitY, yaw * Units.Deg2Rad);
+                    var qz = Quaternion.CreateFromAxisAngle(Vector3.UnitZ, ang.Z * Units.Deg2Rad);
+                    transform.Rotation = qz * qx * qy;
+                }
             }
 
             var data = new EntityData();
@@ -66,6 +79,104 @@ public static class MapCompilerService
             AddComponent(data, new EntityProperties { Values = new Dictionary<string, string>(props) });
 
             if (hasBrushes) CompileBrushes(scene, data, me, ei, cls, s);
+            // model import for misc_model / misc_prefab handled as instance below; misc_model handled here
+            if (!hasBrushes && (cls.Equals("misc_model", StringComparison.OrdinalIgnoreCase) || cls.Equals("misc_gltf", StringComparison.OrdinalIgnoreCase) || cls.Equals("model", StringComparison.OrdinalIgnoreCase)))
+            {
+                string? modelVal = null;
+                if(props.TryGetValue("model", out var mv)) modelVal=mv;
+                else if(props.TryGetValue("modelpath", out var mp)) modelVal=mp;
+                else if(props.TryGetValue("mdl", out var md)) modelVal=md;
+                else if(props.TryGetValue("mesh", out var me2)) modelVal=me2;
+                if(!string.IsNullOrWhiteSpace(modelVal))
+                {
+                    string[] search = new[]{
+                        Directory.GetCurrentDirectory(),
+                        Path.Combine(Directory.GetCurrentDirectory(),"models"),
+                        Path.Combine(Directory.GetCurrentDirectory(),"assets","models"),
+                        Path.Combine(Directory.GetCurrentDirectory(),"Data","models"),
+                        Path.Combine(AppContext.BaseDirectory,"models"),
+                        Path.Combine(AppContext.BaseDirectory,"..","..","..","models"),
+                        Path.Combine(AppContext.BaseDirectory,"..","..","..","assets","models"),
+                        "."
+                    };
+                    var found = ObjModelLoader.FindModelFile(modelVal, search);
+                    if(found!=null && ObjModelLoader.TryLoad(found, out var mdata, $"e{ei}_model"))
+                    {
+                        // apply scale to mesh if transform scale !=1? bake into mesh or keep transform scale
+                        scene.Meshes.Add(mdata);
+                        AddComponent(data, new Model{ Meshes=new[]{mdata.Id}});
+                    }
+                    else
+                    {
+                        Console.WriteLine($"[model] not found '{modelVal}' for entity {ei}");
+                        // fallback: make small cube so entity is visible
+                        var fallbackId=$"e{ei}_fallback";
+                        scene.Meshes.Add(new MeshData{ Id=fallbackId, Material="model_missing", Positions=new float[]{ -0.5f,0,-0.5f, 0.5f,0,-0.5f, 0.5f,0,0.5f, -0.5f,0,0.5f, -0.5f,1, -0.5f, 0.5f,1,-0.5f, 0.5f,1,0.5f, -0.5f,1,0.5f }, Normals=new float[8*3], UVs=new float[8*2], Indices=new int[]{0,1,2,0,2,3,4,6,5,4,7,6} });
+                        // fill normals as up
+                        var fm = scene.Meshes.Last(); for(int i=0;i<fm.Normals.Length;i+=3){ fm.Normals[i]=0; fm.Normals[i+1]=1; fm.Normals[i+2]=0; }
+                        AddComponent(data, new Model{Meshes=new[]{fallbackId}});
+                    }
+                }
+            }
+            // prefab inline expansion for misc_prefab / func_instance
+            if (cls.Equals("misc_prefab", StringComparison.OrdinalIgnoreCase) || cls.Equals("func_instance", StringComparison.OrdinalIgnoreCase) || cls.Equals("prefab", StringComparison.OrdinalIgnoreCase))
+            {
+                string? prefabVal=null;
+                if(props.TryGetValue("prefab", out var pv)) prefabVal=pv;
+                else if(props.TryGetValue("instance", out var iv)) prefabVal=iv;
+                else if(props.TryGetValue("model", out var mv2)) prefabVal=mv2;
+                if(!string.IsNullOrWhiteSpace(prefabVal))
+                {
+                    string[] search2 = new[]{
+                        Directory.GetCurrentDirectory(),
+                        Path.Combine(Directory.GetCurrentDirectory(),"prefabs"),
+                        Path.Combine(Directory.GetCurrentDirectory(),"assets","prefabs"),
+                        Path.Combine(AppContext.BaseDirectory,"prefabs"),
+                        "."
+                    };
+                    string? found2=null;
+                    if(File.Exists(prefabVal)) found2=Path.GetFullPath(prefabVal);
+                    else foreach(var d in search2){ var cand=Path.Combine(d, prefabVal); if(File.Exists(cand)){found2=Path.GetFullPath(cand);break;} var cand2=Path.Combine(d, Path.GetFileName(prefabVal)); if(File.Exists(cand2)){found2=Path.GetFullPath(cand2);break;}}
+                    if(found2!=null)
+                    {
+                        try{
+                            var prefabEnts = MapParser.ParseFile(found2);
+                            Vector3 offset = Vector3.Zero;
+                            if(props.TryGetValue("origin", out var po)) offset=ParseVec3(po);
+                            // compile prefab entities as additional scene entities (baked)
+                            foreach(var pe in prefabEnts)
+                            {
+                                var pd = new EntityData();
+                                // transform offset for point entities
+                                if(pe.Properties.TryGetValue("origin", out var porg))
+                                {
+                                    var pp=ParseVec3(porg)+offset;
+                                    pe.Properties["origin"]=$"{pp.X} {pp.Y} {pp.Z}";
+                                }
+                                // offset brushes
+                                foreach(var br in pe.Brushes) BrushManipulation.Translate(br, offset);
+                                // create copy with name prefixed
+                                string pName = pe.Properties.TryGetValue("targetname", out var ptn) && ptn.Length>0 ? ptn : $"{pe.ClassName}_prefab";
+                                var pTrans = Transform.Identity;
+                                if(pe.Brushes.Count==0 && pe.Properties.TryGetValue("origin", out var po2))
+                                {
+                                    pTrans.Position=SpaceConvert.ToEngine(ParseVec3(po2), s);
+                                    float pyaw=ReadYaw(pe.Properties);
+                                    pTrans.Rotation=Quaternion.CreateFromAxisAngle(Vector3.UnitY, pyaw*Units.Deg2Rad);
+                                }
+                                AddComponent(pd, new EntityName{Value=pName});
+                                AddComponent(pd, pTrans);
+                                AddComponent(pd, new EntityProperties{Values=new Dictionary<string,string>(pe.Properties)});
+                                if(pe.Brushes.Count>0) CompileBrushes(scene, pd, pe, scene.Entities.Count, pe.ClassName, s);
+                                // apply class rules for lights etc
+                                ApplyClassRules(pd, pe.ClassName, pe.Properties, ReadYaw(pe.Properties), s);
+                                scene.Entities.Add(pd);
+                            }
+                            Console.WriteLine($"[prefab] inlined {prefabEnts.Count} entities from '{found2}'");
+                        }catch(Exception ex){ Console.WriteLine($"[prefab] failed {prefabVal}: {ex.Message}"); }
+                    }
+                }
+            }
             ApplyClassRules(data, cls, props, yaw, s);
 
             scene.Entities.Add(data);

@@ -19,6 +19,7 @@ public static class EditorShortcuts
           Q or 1 — Select: click to pick, drag/gizmo (incl. XY/XZ/YZ planes) to move
           3 — Face: click face/blue square → arrows / wheel / drag extrude, X/Y/Z lock
           4 — Vertex: click green cross → arrows / PgUpDn / drag to move corner, X/Y/Z lock
+          X — Clip: 2-3 clicks set plane, Enter front, Shift+Enter back, Ctrl+Enter split both
           Tab — cycle tool  |  F — frame  |  Esc — cancel / clear highlight
         Navigation:
           Hold RMB — Freelook  |  WASD move  |  E/Space up, Q/Z down  |  Shift sprint, Alt slow
@@ -26,9 +27,10 @@ public static class EditorShortcuts
         Selection & edit:
           LMB click — pick brush/entity  |  Drag — move (X/Y/Z lock)  |  Alt-drag duplicate (brush or entity)
           Ctrl+click highlight multiple → Ctrl+D / Alt+drag duplicates all highlighted, arrows/gizmo moves all
-          Ctrl+D duplicate, Ctrl+Alt+X/Y/Z flip, Ctrl+R rotate 90, Ctrl+H hollow, Del delete, Ctrl+Z/Y undo/redo
-        Grid & Brush:
+          Ctrl+C/V/X copy/paste/cut, Ctrl+D duplicate, Ctrl+Alt+X/Y/Z flip, Ctrl+R rotate 90, Ctrl+H hollow, Del delete, Ctrl+Z/Y undo/redo
+        Grid & Brush & UV:
           G snap toggle (hold Shift to bypass)  |  [ / ] grid size  |  Arrows / Shift 8x nudge
           Brush menu → Create Arch… — inner radius / wall / depth / segments → edit wedges with Face/Vertex
+          Face UV: inspector shows Scale/Rotate/Offset per selected face — textures in textures/*.png auto-loaded
         """;
 }

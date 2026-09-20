@@ -54,8 +54,22 @@ public sealed class EditorUI
         "worldspawn", "info_player_start", "info_player_deathmatch", "light",
         "func_detail", "func_wall", "func_illusionary",
         "trigger_multiple", "trigger_once", "trigger_teleport",
-        "misc_model", "item_health", "weapon_shotgun"
+        "misc_model", "misc_prefab", "item_health", "weapon_shotgun"
     };
+    List<FgdClass> _fgdClasses = new();
+    bool _fgdLoaded;
+    IEnumerable<string> AllClassNames => _fgdClasses.Count>0 ? _fgdClasses.Select(c=>c.ClassName).OrderBy(s=>s) : _knownClasses;
+    FgdClass? FindFgd(string classname) => _fgdClasses.FirstOrDefault(c=>c.ClassName.Equals(classname, StringComparison.OrdinalIgnoreCase));
+    void EnsureFgd()
+    {
+        if(_fgdLoaded) return; _fgdLoaded=true;
+        _fgdClasses = FgdParser.TryLoadFromSearch();
+        if(_fgdClasses.Count==0)
+        {
+            // create from knownClasses as fallback with colors
+            foreach(var n in _knownClasses) _fgdClasses.Add(new FgdClass{ ClassName=n, Description=n, Kind=n.StartsWith("info_")||n=="light"?"PointClass":"SolidClass", Color=n=="light"?new Vector3(1,1,0.3f): n.StartsWith("trigger")?new Vector3(1,0.3f,0.3f): new Vector3(0.6f,0.6f,0.9f) });
+        }
+    }
 
     readonly string[] _commonTextures = new[]
     {
@@ -63,15 +77,15 @@ public sealed class EditorUI
         "clip","skip","hint","origin","trigger","nodraw","caulk"
     };
 
-    // s&box — dark flat, blue accent, soft 6px rounding, thin 1px borders. Clean sans.
-    static readonly Vector4 ColBg = new(0.095f, 0.095f, 0.105f, 1f);     // #18181b
-    static readonly Vector4 ColBgDark = new(0.075f, 0.075f, 0.085f, 1f); // #13131a
-    static readonly Vector4 ColPanel = new(0.15f, 0.15f, 0.165f, 1f);    // #26262a
-    static readonly Vector4 ColBeige = new(0.92f, 0.92f, 0.94f, 1f);     // near white (kept name)
-    static readonly Vector4 ColAccent = new(0.26f, 0.48f, 0.96f, 1f);    // s&box blue #4266f5
-    static readonly Vector4 ColAccentHover = new(0.35f, 0.56f, 0.98f, 1f);
-    static readonly Vector4 ColBorderHi = new(0.22f, 0.22f, 0.24f, 1f);  // flat separator
-    static readonly Vector4 ColBorderSh = new(0.08f, 0.08f, 0.09f, 1f);
+    // Nuake — Quake/DOS pixel, IBM VGA 8x16, olive/drab + Quake orange, sharp 0px, 1px border
+    static readonly Vector4 ColBg = new(0.06f, 0.08f, 0.11f, 1f);     // #0f141c Nuake bg
+    static readonly Vector4 ColBgDark = new(0.04f, 0.06f, 0.09f, 1f); // #0a0e13
+    static readonly Vector4 ColPanel = new(0.10f, 0.13f, 0.17f, 1f);    // #1a212c panel
+    static readonly Vector4 ColBeige = new(0.88f, 0.84f, 0.78f, 1f);     // quake beige #e0d8c8
+    static readonly Vector4 ColAccent = new(1f, 0.55f, 0f, 1f);    // Nuake Quake orange #ff8c00
+    static readonly Vector4 ColAccentHover = new(1f, 0.65f, 0.18f, 1f);
+    static readonly Vector4 ColBorderHi = new(0.18f, 0.24f, 0.31f, 1f);  // quake olive border
+    static readonly Vector4 ColBorderSh = new(0.05f, 0.07f, 0.11f, 1f);
 
     bool _themePushed;
 
@@ -87,12 +101,71 @@ public sealed class EditorUI
     public void ShowArchDialog() { _showArchDialog = true; }
     public void Tick(float dt) { if (_statusTimer > 0) _statusTimer -= dt; }
 
+    bool _showSceneBrowser = true;
+    bool _showMaterialBrowser = true;
+    bool _showEntityPalette = false;
+    bool _showOrtho = true;
+    public bool ShowSearchReport = false;
+    string _searchQuery = "";
+    string _replaceKey = "";
+    string _replaceValue = "";
+    bool _resetLayoutRequested = false;
+    public bool ResetLayoutRequested => _resetLayoutRequested;
+    public void ClearResetFlag() => _resetLayoutRequested = false;
+    public void SetShowFlags(bool scene, bool mat, bool entity, bool ortho){ _showSceneBrowser=scene; _showMaterialBrowser=mat; _showEntityPalette=entity; _showOrtho=ortho; }
+    public bool GetShowFlag(string which)=> which switch{ "scene"=>_showSceneBrowser, "material"=>_showMaterialBrowser, "entity"=>_showEntityPalette, "ortho"=>_showOrtho, _=>false };
+    public (Vector2 topPan,float topZoom, Vector2 frontPan,float frontZoom, Vector2 sidePan,float sideZoom) GetOrtho()=> (_topView.Pan,_topView.Zoom,_frontView.Pan,_frontView.Zoom,_sideView.Pan,_sideView.Zoom);
+    public void SetOrtho(Vector2 tp,float tz, Vector2 fp,float fz, Vector2 sp,float sz){ _topView.Pan=tp; _topView.Zoom=tz; _frontView.Pan=fp; _frontView.Zoom=fz; _sideView.Pan=sp; _sideView.Zoom=sz; }
+    OrthoView _topView = new(OrthoAxis.Top);
+    OrthoView _frontView = new(OrthoAxis.Front);
+    OrthoView _sideView = new(OrthoAxis.Side);
+    string _matFilter = "";
+    string _entityFilter = "";
+    List<string> _matList = new();
+    float _matRefreshTimer = 0;
+    int _csgOp = 0; // 0 subtract,1 intersect,2 union
+
+    public void ResetLayout()
+    {
+        _showSceneBrowser = true;
+        _showMaterialBrowser = true;
+        _showEntityPalette = false;
+        _showOrtho = true;
+        _topView.Pan = Vector2.Zero; _topView.Zoom = 0.6f;
+        _frontView.Pan = Vector2.Zero; _frontView.Zoom = 0.6f;
+        _sideView.Pan = Vector2.Zero; _sideView.Zoom = 0.6f;
+        _resetLayoutRequested = true;
+        // delete ImGui ini to clear docking
+        try
+        {
+            foreach(var p in new[]{ "imgui.ini", Path.Combine(AppContext.BaseDirectory,"imgui.ini"), Path.Combine(Directory.GetCurrentDirectory(),"imgui.ini")})
+                if(File.Exists(p)) File.Delete(p);
+        } catch {}
+        SetStatus("Layout reset — windows will snap to default next frame");
+    }
+
     public void Draw(Vector2 viewportSize, float fps, Vector3 camPos, int meshCount, int brushCount)
     {
         EnsureTheme();
+        // if reset requested, force next windows to always position and clear dock
+        if (_resetLayoutRequested)
+        {
+            // clear docking by loading empty ini
+            ImGui.LoadIniSettingsFromDisk("");
+            _resetLayoutRequested = false;
+        }
         DrawMainMenu();
         DrawToolbar(viewportSize);
-        // Outliner removed — brush list no longer shown on side (inspect via Inspector → Brushes)
+        if (_showSceneBrowser) DrawSceneBrowser();
+        if (_showMaterialBrowser) DrawMaterialBrowser();
+        if (_showEntityPalette) DrawEntityPalette();
+        if (_showOrtho)
+        {
+            OrthoRenderer.DrawOrthoWindow("Top (XY) — Middle-drag pan, Wheel zoom", _topView, _session, _recompile, SetStatus);
+            OrthoRenderer.DrawOrthoWindow("Front (XZ)", _frontView, _session, _recompile, SetStatus);
+            OrthoRenderer.DrawOrthoWindow("Side (YZ)", _sideView, _session, _recompile, SetStatus);
+        }
+        if (ShowSearchReport) DrawSearchReport();
         DrawInspector();
         DrawStatusBar(viewportSize, fps, camPos, meshCount, brushCount);
         DrawFileDialogs();
@@ -105,44 +178,44 @@ public sealed class EditorUI
         if (_themePushed) return;
         _themePushed = true;
         var s = ImGui.GetStyle();
-        // s&box: flat, soft 6px, thin 1px — modern source2
-        s.WindowRounding = 6; s.FrameRounding = 4; s.GrabRounding = 4; s.ScrollbarRounding = 8; s.TabRounding = 4; s.PopupRounding = 6;
+        // Nuake: Quake/DOS IBM VGA 8x16, sharp pixel, olive drab + Quake orange
+        s.WindowRounding = 0; s.FrameRounding = 0; s.GrabRounding = 0; s.ScrollbarRounding = 0; s.TabRounding = 0; s.PopupRounding = 0;
         s.WindowBorderSize = 1; s.FrameBorderSize = 0; s.ChildBorderSize = 0; s.PopupBorderSize = 1;
-        s.FramePadding = new Vector2(6, 4); s.ItemSpacing = new Vector2(6, 4); s.ItemInnerSpacing = new Vector2(4, 4);
-        s.WindowPadding = new Vector2(8, 6); s.WindowTitleAlign = new Vector2(0.02f, 0.5f);
-        s.ScrollbarSize = 10; s.GrabMinSize = 12;
+        s.FramePadding = new Vector2(4, 2); s.ItemSpacing = new Vector2(6, 3); s.ItemInnerSpacing = new Vector2(4, 2);
+        s.WindowPadding = new Vector2(6, 4); s.WindowTitleAlign = new Vector2(0.02f, 0.5f);
+        s.ScrollbarSize = 8; s.GrabMinSize = 10;
         var c = s.Colors;
-        c[(int)ImGuiCol.Text] = new Vector4(0.92f, 0.92f, 0.94f, 1f);
-        c[(int)ImGuiCol.TextDisabled] = new Vector4(0.50f, 0.50f, 0.56f, 1f);
-        c[(int)ImGuiCol.WindowBg] = new Vector4(0.14f, 0.14f, 0.155f, 1f);
-        c[(int)ImGuiCol.ChildBg] = new Vector4(0.13f, 0.13f, 0.145f, 1f);
-        c[(int)ImGuiCol.PopupBg] = new Vector4(0.16f, 0.16f, 0.18f, 1f);
-        c[(int)ImGuiCol.Border] = new Vector4(0.22f, 0.22f, 0.24f, 1f);
+        c[(int)ImGuiCol.Text] = new Vector4(0.88f, 0.84f, 0.78f, 1f); // quake beige
+        c[(int)ImGuiCol.TextDisabled] = new Vector4(0.42f, 0.45f, 0.50f, 1f);
+        c[(int)ImGuiCol.WindowBg] = new Vector4(0.07f, 0.09f, 0.13f, 1f); // #12151f
+        c[(int)ImGuiCol.ChildBg] = new Vector4(0.09f, 0.12f, 0.16f, 1f);
+        c[(int)ImGuiCol.PopupBg] = new Vector4(0.11f, 0.14f, 0.19f, 1f);
+        c[(int)ImGuiCol.Border] = new Vector4(0.18f, 0.24f, 0.31f, 1f);
         c[(int)ImGuiCol.BorderShadow] = new Vector4(0f, 0f, 0f, 0f);
-        c[(int)ImGuiCol.FrameBg] = new Vector4(0.20f, 0.20f, 0.23f, 1f);
-        c[(int)ImGuiCol.FrameBgHovered] = new Vector4(0.26f, 0.26f, 0.30f, 1f);
-        c[(int)ImGuiCol.FrameBgActive] = new Vector4(0.22f, 0.22f, 0.26f, 1f);
-        c[(int)ImGuiCol.TitleBg] = new Vector4(0.10f, 0.10f, 0.115f, 1f);
-        c[(int)ImGuiCol.TitleBgActive] = new Vector4(0.14f, 0.14f, 0.16f, 1f);
-        c[(int)ImGuiCol.TitleBgCollapsed] = new Vector4(0.10f, 0.10f, 0.115f, 1f);
-        c[(int)ImGuiCol.MenuBarBg] = new Vector4(0.12f, 0.12f, 0.135f, 1f);
-        c[(int)ImGuiCol.ScrollbarBg] = new Vector4(0.12f, 0.12f, 0.135f, 1f);
-        c[(int)ImGuiCol.ScrollbarGrab] = new Vector4(0.24f, 0.24f, 0.28f, 1f);
-        c[(int)ImGuiCol.ScrollbarGrabHovered] = new Vector4(0.30f, 0.30f, 0.35f, 1f);
+        c[(int)ImGuiCol.FrameBg] = new Vector4(0.13f, 0.16f, 0.21f, 1f);
+        c[(int)ImGuiCol.FrameBgHovered] = new Vector4(0.18f, 0.22f, 0.28f, 1f);
+        c[(int)ImGuiCol.FrameBgActive] = new Vector4(0.16f, 0.20f, 0.26f, 1f);
+        c[(int)ImGuiCol.TitleBg] = new Vector4(0.05f, 0.07f, 0.11f, 1f);
+        c[(int)ImGuiCol.TitleBgActive] = new Vector4(0.08f, 0.11f, 0.15f, 1f);
+        c[(int)ImGuiCol.TitleBgCollapsed] = new Vector4(0.05f, 0.07f, 0.11f, 1f);
+        c[(int)ImGuiCol.MenuBarBg] = new Vector4(0.06f, 0.09f, 0.12f, 1f);
+        c[(int)ImGuiCol.ScrollbarBg] = new Vector4(0.06f, 0.09f, 0.12f, 1f);
+        c[(int)ImGuiCol.ScrollbarGrab] = new Vector4(0.18f, 0.24f, 0.31f, 1f);
+        c[(int)ImGuiCol.ScrollbarGrabHovered] = new Vector4(0.22f, 0.28f, 0.35f, 1f);
         c[(int)ImGuiCol.ScrollbarGrabActive] = ColAccent;
         c[(int)ImGuiCol.CheckMark] = ColAccent;
         c[(int)ImGuiCol.SliderGrab] = ColAccent;
         c[(int)ImGuiCol.SliderGrabActive] = ColAccentHover;
-        c[(int)ImGuiCol.Button] = new Vector4(0.20f, 0.20f, 0.24f, 1f);
-        c[(int)ImGuiCol.ButtonHovered] = new Vector4(0.28f, 0.28f, 0.33f, 1f);
-        c[(int)ImGuiCol.ButtonActive] = new Vector4(0.18f, 0.18f, 0.22f, 1f);
-        c[(int)ImGuiCol.Header] = new Vector4(0.18f, 0.18f, 0.22f, 1f);
-        c[(int)ImGuiCol.HeaderHovered] = new Vector4(0.26f, 0.26f, 0.31f, 1f);
-        c[(int)ImGuiCol.HeaderActive] = new Vector4(0.22f, 0.32f, 0.70f, 1f);
-        c[(int)ImGuiCol.Separator] = new Vector4(0.22f, 0.22f, 0.24f, 1f);
+        c[(int)ImGuiCol.Button] = new Vector4(0.14f, 0.17f, 0.22f, 1f);
+        c[(int)ImGuiCol.ButtonHovered] = new Vector4(0.20f, 0.24f, 0.30f, 1f);
+        c[(int)ImGuiCol.ButtonActive] = new Vector4(0.12f, 0.15f, 0.20f, 1f);
+        c[(int)ImGuiCol.Header] = new Vector4(0.13f, 0.17f, 0.23f, 1f);
+        c[(int)ImGuiCol.HeaderHovered] = new Vector4(0.18f, 0.23f, 0.30f, 1f);
+        c[(int)ImGuiCol.HeaderActive] = new Vector4(0.95f, 0.45f, 0.05f, 1f); // orange active
+        c[(int)ImGuiCol.Separator] = new Vector4(0.18f, 0.24f, 0.31f, 1f);
         c[(int)ImGuiCol.SeparatorHovered] = ColAccent;
         c[(int)ImGuiCol.SeparatorActive] = ColAccentHover;
-        c[(int)ImGuiCol.Tab] = new Vector4(0.16f, 0.16f, 0.18f, 1f);
+        c[(int)ImGuiCol.Tab] = new Vector4(0.10f, 0.13f, 0.17f, 1f);
         c[(int)ImGuiCol.TabHovered] = ColAccent;
         c[(int)ImGuiCol.DockingPreview] = new Vector4(ColAccent.X, ColAccent.Y, ColAccent.Z, 0.35f);
         c[(int)ImGuiCol.DockingEmptyBg] = ColBg;
@@ -168,6 +241,10 @@ public sealed class EditorUI
             if (ImGui.MenuItem("Undo", "Ctrl+Z", false, _session.CanUndo)) { _session.Undo(); _recompile(); SetStatus("Undo"); }
             if (ImGui.MenuItem("Redo", "Ctrl+Shift+Z", false, _session.CanRedo)) { _session.Redo(); _recompile(); SetStatus("Redo"); }
             ImGui.Separator();
+            if (ImGui.MenuItem("Copy", "Ctrl+C", false, _session.Selected!=null || _session.IsMultiMode)) { if(_session.CopySelected()) SetStatus("Copied to clipboard (Ctrl+V to paste)"); }
+            if (ImGui.MenuItem("Cut", "Ctrl+X", false, _session.Selected!=null || _session.IsMultiMode)) { if(_session.CutSelected()) { _recompile(); SetStatus("Cut"); } }
+            if (ImGui.MenuItem("Paste", "Ctrl+V", false, _session.CanPaste)) { if(_session.PasteAt()) { _recompile(); SetStatus("Pasted (+32 offset)"); } }
+            ImGui.Separator();
             if (ImGui.MenuItem("Duplicate", "Ctrl+D", false, _session.Selected != null)) { if (_session.Mode==EditMode.Brush && _session.SelectedBrush!=null) { _session.DuplicateBrush(_session.SelectedBrushIndex); SetStatus("Duplicated brush"); } else { _session.DuplicateSelected(); SetStatus("Duplicated entity"); } _recompile(); }
             if (ImGui.MenuItem("Duplicate (Alt+drag)", "Alt+LMB", false, _session.Selected != null)) SetStatus("Hold Alt and drag to duplicate");
             if (ImGui.MenuItem("Delete", "Del", false, _session.Selected != null)) { _session.DeleteSelected(); _recompile(); }
@@ -184,21 +261,43 @@ public sealed class EditorUI
             if (ImGui.MenuItem("Move Brush", "Alt+drag / Gizmo")) SetStatus("Move: gizmo, drag, arrows (Alt+arrows extrude)");
             if (ImGui.MenuItem("Extrude Face", "Face tool + drag/wheel/arrows")) SetStatus("Face: pick face squares, drag along normal");
             if (ImGui.MenuItem("Move Vertex", "Vertex tool + drag/arrows")) SetStatus("Vertex: pick green cross, drag/arrows + X/Y/Z lock");
+            if (ImGui.MenuItem("Move Edge", "Edge tool (5) — pick yellow edge, drag")) SetStatus("Edge: pick handle, drag + X/Y/Z lock");
             ImGui.Separator();
-            if (ImGui.MenuItem("Create Arch...", "Shift+A")) _showArchDialog = true;
+            if (ImGui.MenuItem("Create Arch...", "Ctrl+Shift+A")) _showArchDialog = true;
+            ImGui.Separator();
+            if (ImGui.MenuItem("CSG Subtract", "Ctrl+Shift+S", false, _session.MultiSelectedBrushes.Count>=1)) { if(_session.CsgSubtract()){ _recompile(); SetStatus("CSG Subtract"); } else SetStatus("CSG Subtract failed — need 2 brushes (select target + cutter)"); }
+            if (ImGui.MenuItem("CSG Intersect", "Ctrl+Shift+I", false, _session.MultiSelectedBrushes.Count>=2)) { if(_session.CsgIntersect()){ _recompile(); SetStatus("CSG Intersect"); } else SetStatus("CSG Intersect failed"); }
+            if (ImGui.MenuItem("CSG Union", "Ctrl+Shift+U", false, _session.MultiSelectedBrushes.Count>=2)) { if(_session.CsgUnion()){ _recompile(); SetStatus("CSG Union"); } else SetStatus("Union failed"); }
             ImGui.Separator();
             if (ImGui.MenuItem("Unlink Brushes (explode)", "Ctrl+Shift+G", false, _session.Selected != null && _session.Selected.Brushes.Count > 1))
             { if (_session.UnlinkSelectedBrushes()) { _recompile(); SetStatus("Unlinked — each brush is now independent (no linked system)"); } else SetStatus("Unlink failed"); }
             if (ImGui.MenuItem("Group Highlighted", "Ctrl+G", false, _session.IsMultiMode)) { if (_session.GroupHighlightedBrushes()) { _recompile(); SetStatus("Grouped highlighted into one entity — now linked"); } else SetStatus("Group failed"); }
             bool link = _session.LinkBrushes;
             if (ImGui.MenuItem("Link Highlighted Move", "", link)) { _session.LinkBrushes = !link; SetStatus(link ? "Link OFF — brushes independent" : "Link ON — Ctrl+highlighted move together"); }
-            if (ImGui.MenuItem("Clip (planned)", "X")) SetStatus("Clip tool planned — use face handles for now");
+            if (ImGui.MenuItem("Clip: set plane (X)", "X", _session.Mode==EditMode.Clip)) { _session.Mode=EditMode.Clip; SetStatus("Clip (X): click 2-3 points, Enter keep front, Shift+Enter keep back, Ctrl+Enter split both"); }
+            if (ImGui.MenuItem("Clip: Execute Front", "Enter", _session.ClipPoints.Count>=2)) { if(_session.ExecuteClip(true,false)) { _recompile(); SetStatus("Clipped — kept front"); } else SetStatus("Clip failed — plane didn't intersect"); }
+            if (ImGui.MenuItem("Clip: Execute Back", "Shift+Enter", _session.ClipPoints.Count>=2)) { if(_session.ExecuteClip(false,false)) { _recompile(); SetStatus("Clipped — kept back"); } else SetStatus("Clip failed"); }
+            if (ImGui.MenuItem("Clip: Split Both", "Ctrl+Enter", _session.ClipPoints.Count>=2)) { if(_session.ExecuteClip(true,true)) { _recompile(); SetStatus("Split — kept both halves"); } else SetStatus("Split failed"); }
+            if (ImGui.MenuItem("Clip: Clear Points", "Esc", _session.ClipPoints.Count>0)) { _session.ClearClipPoints(); SetStatus("Clip points cleared"); }
             ImGui.EndMenu();
         }
         if (ImGui.BeginMenu("View"))
         {
             if (ImGui.MenuItem("Frame Selection", "F")) SetStatus("Press F in viewport");
             if (ImGui.MenuItem("Grid Snap", "G", _session.GridSnapEnabled)) _session.GridSnapEnabled = !_session.GridSnapEnabled;
+            ImGui.Separator();
+            if (ImGui.MenuItem("Scene Browser", "", _showSceneBrowser)) _showSceneBrowser=!_showSceneBrowser;
+            if (ImGui.MenuItem("Material Browser", "", _showMaterialBrowser)) _showMaterialBrowser=!_showMaterialBrowser;
+            if (ImGui.MenuItem("Entity Palette", "", _showEntityPalette)) _showEntityPalette=!_showEntityPalette;
+            if (ImGui.MenuItem("2D Views (Top/Front/Side)", "", _showOrtho)) _showOrtho=!_showOrtho;
+            if (ImGui.MenuItem("Search / Entity Report", "Ctrl+F", ShowSearchReport)) ShowSearchReport=!ShowSearchReport;
+            ImGui.Separator();
+            if (ImGui.MenuItem("Reset Layout", "F12")) ResetLayout();
+            ImGui.EndMenu();
+        }
+        if (ImGui.BeginMenu("Window"))
+        {
+            if (ImGui.MenuItem("Reset Layout to Default")) ResetLayout();
             ImGui.EndMenu();
         }
         if (ImGui.BeginMenu("Help"))
@@ -245,6 +344,9 @@ public sealed class EditorUI
         ToolBtn("Brush", EditMode.Brush, "Draw brushes — default (B / 2). Drag empty space. Alt+Arrows extrude");
         ToolBtn("Face", EditMode.Face, "Pick + extrude face (3) — arrows/wheel");
         ToolBtn("Vertex", EditMode.Vertex, "Edit brush corners (4) — arrows/drag move corner");
+        ToolBtn("Edge", EditMode.Edge, "Edge (5) — pick yellow edge, drag");
+        ToolBtn("Clip", EditMode.Clip, "Clip brush by plane (X) — 2-3 clicks define plane, Enter to clip");
+        ToolBtn("Entity", EditMode.Entity, "Entity (E) — click to place point entity");
         ImGui.TextDisabled("|"); ImGui.SameLine();
 
         bool snap = _session.GridSnapEnabled;
@@ -271,6 +373,11 @@ public sealed class EditorUI
         if (ImGui.Button("Arch")) _showArchDialog = true;
         if (ImGui.IsItemHovered()) ImGui.SetTooltip("Create arch — doorway/tunnel (Shift+A)");
 
+        ImGui.SameLine(); ImGui.SetNextItemWidth(120); if(ImGui.InputTextWithHint("##toolbarSearch","Search...", ref _searchQuery, 64)){ ShowSearchReport=true; }
+        ImGui.SameLine(); if(ImGui.Button("Find")) ShowSearchReport=!ShowSearchReport;
+        ImGui.SameLine(); ImGui.TextDisabled("|"); ImGui.SameLine();
+        if (ImGui.Button("Reset UI")) ResetLayout();
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Reset all panels to default — Scene/Browser/Materials/2D Views (F12)");
         ImGui.SameLine(); ImGui.TextDisabled("|"); ImGui.SameLine();
         ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.16f,0.55f,0.30f,1f));
         if (ImGui.Button("Play")) LaunchPlay();
@@ -281,8 +388,26 @@ public sealed class EditorUI
 
     void DrawOutliner()
     {
-        ImGui.SetNextWindowSize(new Vector2(240, 400), ImGuiCond.FirstUseEver);
-        if (!ImGui.Begin("Outliner")) { ImGui.End(); return; }
+        ImGui.SetNextWindowSize(new Vector2(320, 500), ImGuiCond.FirstUseEver);
+        if (!ImGui.Begin("Scene Browser")) { ImGui.End(); return; }
+        // Layers row
+        ImGui.TextDisabled("Layers:");
+        ImGui.SameLine();
+        foreach(var layer in _session.AllLayers)
+        {
+            bool vis=_session.IsLayerVisible(layer);
+            string lbl = (vis?"● ":"○ ")+layer + (layer==_session.ActiveLayer?" ★":"");
+            if(vis) ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0.85f,0.85f,1f,1f));
+            if(ImGui.SmallButton(lbl)){ _session.SetLayerVisible(layer, !vis); _recompile(); SetStatus($"{layer} {(vis?"hidden":"shown")}"); }
+            if(vis) ImGui.PopStyleColor();
+            ImGui.SameLine();
+        }
+        ImGui.NewLine();
+        string newLayer=""; // inline create
+        ImGui.SetNextItemWidth(100); if(ImGui.InputTextWithHint("##newlayer","New layer", ref newLayer, 32, ImGuiInputTextFlags.EnterReturnsTrue) && !string.IsNullOrWhiteSpace(newLayer)){ _session.ActiveLayer=newLayer; _session.SetLayerVisible(newLayer,true); SetStatus($"Active layer {newLayer}"); }
+        ImGui.SameLine(); ImGui.TextDisabled($"Active:{_session.ActiveLayer}");
+        if(ImGui.IsItemHovered()) ImGui.SetTooltip("New brushes/entities go to active layer");
+        ImGui.Separator();
         ImGui.TextDisabled("worldspawn = world geometry. Each brush below is independent.");
         ImGui.SetNextItemWidth(-1);
         ImGui.InputTextWithHint("##filter", "Filter brush/texture...", ref _filter, 128);
@@ -346,18 +471,22 @@ public sealed class EditorUI
                 continue;
             }
             // point entity or single-brush entity
+            string layer2=_session.GetEntityLayer(e);
+            bool vis2=_session.IsLayerVisible(layer2);
+            if (!vis2) ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0.45f,0.45f,0.48f,1f));
             if (!string.IsNullOrWhiteSpace(low))
             {
-                string hay=(e.ClassName+" "+string.Join(" ",e.Properties.Values)).ToLowerInvariant();
-                if (!hay.Contains(low)) continue;
+                string hay=(e.ClassName+" "+string.Join(" ",e.Properties.Values)+ " "+layer2).ToLowerInvariant();
+                if (!hay.Contains(low)) { if(!vis2) ImGui.PopStyleColor(); continue; }
             }
-            string label2 = $"{i}: {e.ClassName}";
+            string label2 = $"{i}: {e.ClassName} [{layer2}]";
             if (e.Properties.TryGetValue("targetname", out var tn2) && !string.IsNullOrEmpty(tn2)) label2 += $" ({tn2})";
             if (e.Brushes.Count==1) { var br0=e.Brushes[0]; KREAN.MapCompiler.BrushManipulation.GetBounds(br0, out var mn0, out var mx0); label2+=$" [{mx0.X-mn0.X:0}x{mx0.Y-mn0.Y:0}]"; }
             else if (e.Brushes.Count>0) label2 += $" [{e.Brushes.Count}]";
             bool sel2=i==_session.SelectedIndex || _session.IsMultiEntitySelected(i);
-            if (sel2 && _session.IsMultiEntitySelected(i)) ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f,0.55f,0.15f,1f));
+            if (sel2 && _session.IsMultiEntitySelected(i)) { if(!vis2) ImGui.PopStyleColor(); ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f,0.55f,0.15f,1f)); }
             bool clicked2 = ImGui.Selectable(label2, sel2);
+            if(!vis2 && !(sel2 && _session.IsMultiEntitySelected(i))) ImGui.PopStyleColor();
             if (sel2 && _session.IsMultiEntitySelected(i)) ImGui.PopStyleColor();
             if (clicked2)
             {
@@ -376,12 +505,154 @@ public sealed class EditorUI
                 if (ImGui.MenuItem("Duplicate")) { _session.Select(i); _session.DuplicateSelected(); _recompile(); }
                 if (ImGui.MenuItem("Delete")) { _session.Select(i); _session.DeleteSelected(); _recompile(); }
                 if (e.Brushes.Count>1 && ImGui.MenuItem("Unlink brushes")) { _session.Select(i); if(_session.UnlinkSelectedBrushes()){ _recompile(); SetStatus("Unlinked — each brush is now its own worldspawn"); } }
+                if (ImGui.BeginMenu("Move to layer"))
+                {
+                    foreach(var ly in _session.AllLayers){ if(ImGui.MenuItem(ly, "", layer2==ly)){ _session.SetEntityLayer(i, ly); _recompile(); } }
+                    ImGui.Separator(); string nl=""; if(ImGui.InputTextWithHint("##nl","New layer", ref nl, 32, ImGuiInputTextFlags.EnterReturnsTrue) && !string.IsNullOrWhiteSpace(nl)){ _session.SetEntityLayer(i,nl); _recompile(); }
+                    ImGui.EndMenu();
+                }
+                if (ImGui.MenuItem(vis2?"Hide layer":"Show layer")){ _session.SetLayerVisible(layer2, !vis2); _recompile(); }
                 ImGui.EndPopup();
             }
         }
         ImGui.EndChild();
         ImGui.TextDisabled($"{_session.Entities.Count} entities  •  click brush # to move alone");
         if (_session.MultiSelectedBrushes.Count>0) ImGui.TextColored(new Vector4(1,0.55f,0.15f,1), $"{_session.MultiSelectedBrushes.Count} brushes highlighted — independent (Link OFF)");
+        ImGui.End();
+    }
+
+    void DrawSceneBrowser()
+    {
+        // reuse Outliner as Scene Browser
+        DrawOutliner();
+    }
+
+    void DrawMaterialBrowser()
+    {
+        ImGui.SetNextWindowSize(new Vector2(260, 300), ImGuiCond.FirstUseEver);
+        if (!ImGui.Begin("Materials")) { ImGui.End(); return; }
+        // refresh list periodically or on filter change
+        _matRefreshTimer -= ImGui.GetIO().DeltaTime;
+        if (_matList.Count==0 || _matRefreshTimer<=0)
+        {
+            _matRefreshTimer = 2f;
+            var discovered = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach(var t in _commonTextures) discovered.Add(t);
+            // scan textures folders
+            foreach(var dir in new[]{"textures","assets/textures","Data/textures","Materials","materials"})
+            {
+                if(!Directory.Exists(dir)) continue;
+                try{ foreach(var f in Directory.GetFiles(dir, "*.*", SearchOption.TopDirectoryOnly).Take(200)){ var n=Path.GetFileNameWithoutExtension(f); if(!string.IsNullOrWhiteSpace(n)) discovered.Add(n); } }catch{}
+                try{ foreach(var f in Directory.GetFiles(dir, "*.*", SearchOption.AllDirectories).Take(200)){ var n=Path.GetFileNameWithoutExtension(f); if(!string.IsNullOrWhiteSpace(n)) discovered.Add(n); } }catch{}
+            }
+            // also collect from map
+            foreach(var e in _session.Entities) foreach(var b in e.Brushes) foreach(var f in b.Faces) if(!string.IsNullOrEmpty(f.Texture)) discovered.Add(f.Texture);
+            _matList = discovered.OrderBy(s=>s).ToList();
+        }
+        ImGui.InputTextWithHint("##matfilter","Filter", ref _matFilter, 64);
+        ImGui.TextDisabled($"{_matList.Count} materials  •  click to apply to selected face");
+        ImGui.BeginChild("##matgrid", new Vector2(0, -28), ImGuiChildFlags.Borders);
+        string low=_matFilter.ToLowerInvariant();
+        foreach(var mat in _matList)
+        {
+            if(!string.IsNullOrWhiteSpace(low) && !mat.ToLowerInvariant().Contains(low)) continue;
+            bool isSel = _session.DefaultTexture==mat || (_session.SelectedBrush!=null && _session.SelectedFaceIndex>=0 && _session.SelectedBrush.Faces[_session.SelectedFaceIndex].Texture==mat);
+            if(isSel) ImGui.PushStyleColor(ImGuiCol.Button, ColAccent);
+            // color preview
+            var col = KREAN.Runtime.Rendering.MaterialPalette.ColorFor(mat);
+            ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(col.X*0.6f, col.Y*0.6f, col.Z*0.6f, 1));
+            if(ImGui.Button(mat, new Vector2(-1, 20))) { _session.DefaultTexture=mat; _newBrushTex=mat; if(_session.SelectedBrush!=null && _session.SelectedFaceIndex>=0){ _session.SelectedBrush.Faces[_session.SelectedFaceIndex].Texture=mat; _recompile(); SetStatus($"Texture {mat}"); } }
+            ImGui.PopStyleColor();
+            if(isSel) ImGui.PopStyleColor();
+        }
+        ImGui.EndChild();
+        if(ImGui.Button("Apply to Brush", new Vector2(-1,0)) && _session.SelectedBrush!=null){ foreach(var f in _session.SelectedBrush.Faces) f.Texture=_session.DefaultTexture; _recompile(); }
+        ImGui.End();
+    }
+
+    void DrawEntityPalette()
+    {
+        EnsureFgd();
+        ImGui.SetNextWindowSize(new Vector2(280, 380), ImGuiCond.FirstUseEver);
+        if (!ImGui.Begin("Entities")) { ImGui.End(); return; }
+        ImGui.InputTextWithHint("##efilter","Filter classname", ref _entityFilter, 64);
+        string low=_entityFilter.ToLowerInvariant();
+        ImGui.BeginChild("##entlist", new Vector2(0,-28), ImGuiChildFlags.Borders);
+        foreach(var fgd in _fgdClasses.OrderBy(c=>c.ClassName))
+        {
+            var c=fgd.ClassName;
+            if(!string.IsNullOrWhiteSpace(low) && !c.ToLowerInvariant().Contains(low) && !fgd.Description.ToLowerInvariant().Contains(low)) continue;
+            var col=fgd.Color;
+            ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(col.X, col.Y, col.Z, 1f));
+            bool sel = ImGui.Selectable($"{c}##{c}", false);
+            ImGui.PopStyleColor();
+            if(ImGui.IsItemHovered()) ImGui.SetTooltip($"{fgd.Kind}: {fgd.Description}");
+            if(sel){ _session.Mode=EditMode.Entity; SetStatus($"Entity tool: {c} — click in 3D to place"); _entityFilter=c; }
+        }
+        ImGui.EndChild();
+        ImGui.TextDisabled("Select class, then click in viewport (Entity mode).");
+        string curFilt=_entityFilter;
+        if(ImGui.Button($"Place {curFilt} at origin", new Vector2(-1,0))){ string cls=AllClassNames.FirstOrDefault(x=>x==curFilt) ?? "light"; _session.AddEntity(cls, new Vector3(0,0,32)); _recompile(); }
+        ImGui.End();
+    }
+
+    void DrawSearchReport()
+    {
+        ImGui.SetNextWindowSize(new Vector2(420, 320), ImGuiCond.FirstUseEver);
+        if(!ImGui.Begin("Search / Entity Report")){ ImGui.End(); return; }
+        ImGui.InputTextWithHint("##search","Search classname / property / texture / layer...", ref _searchQuery, 128);
+        string low=_searchQuery.ToLowerInvariant();
+        var matches=new List<int>();
+        if(!string.IsNullOrWhiteSpace(low))
+        {
+            for(int i=0;i<_session.Entities.Count;i++)
+            {
+                var e=_session.Entities[i];
+                string hay = e.ClassName + " " + string.Join(" ", e.Properties.Select(kv=>kv.Key+" "+kv.Value)) + " " + _session.GetEntityLayer(e);
+                if(hay.ToLowerInvariant().Contains(low)) { matches.Add(i); continue; }
+                // also check textures
+                foreach(var b in e.Brushes) foreach(var f in b.Faces) if(f.Texture.ToLowerInvariant().Contains(low)){ matches.Add(i); break; }
+            }
+        }
+        ImGui.TextDisabled($"{matches.Count} matches / {_session.Entities.Count} entities");
+        ImGui.BeginChild("##sresults", new Vector2(0,120), ImGuiChildFlags.Borders);
+        foreach(var idx in matches.Take(200))
+        {
+            var e=_session.Entities[idx];
+            string label = $"{idx}: {e.ClassName} [{_session.GetEntityLayer(e)}]";
+            if(e.Properties.TryGetValue("targetname", out var tn) && !string.IsNullOrEmpty(tn)) label+=$" ({tn})";
+            bool sel = idx==_session.SelectedIndex;
+            if(ImGui.Selectable(label, sel)){ _session.ClearAllMulti(); _session.Select(idx); _recompile(); SetStatus($"Selected {idx}"); }
+            if(ImGui.IsItemHovered()) ImGui.SetTooltip(string.Join("\n", e.Properties.Select(kv=>kv.Key+" = "+kv.Value)));
+        }
+        ImGui.EndChild();
+        ImGui.Separator();
+        ImGui.Text("Replace:");
+        ImGui.SetNextItemWidth(120); ImGui.InputTextWithHint("##rkey","key", ref _replaceKey, 64); ImGui.SameLine();
+        ImGui.SetNextItemWidth(120); ImGui.InputTextWithHint("##rval","value (empty=remove)", ref _replaceValue, 64); ImGui.SameLine();
+        if(ImGui.Button("Replace in matches") && !string.IsNullOrWhiteSpace(_replaceKey) && matches.Count>0)
+        {
+            _session.BeginUndoGroup("replace");
+            int cnt=0;
+            foreach(var idx in matches)
+            {
+                var e=_session.Entities[idx];
+                if(string.IsNullOrEmpty(_replaceValue)) { if(e.Properties.ContainsKey(_replaceKey)){ e.Properties.Remove(_replaceKey); cnt++; } }
+                else { e.Properties[_replaceKey]=_replaceValue; cnt++; }
+            }
+            _session.EndUndoGroup(true);
+            _recompile();
+            SetStatus($"Replaced {_replaceKey} in {cnt} entities");
+        }
+        ImGui.SameLine();
+        if(ImGui.Button("Select all matches"))
+        {
+            _session.ClearAllMulti();
+            foreach(var idx in matches) _session.MultiSelectedEntities.Add(idx);
+            if(matches.Count>0) _session.Select(matches[0]);
+            _recompile();
+            SetStatus($"Selected {matches.Count} matches");
+        }
         ImGui.End();
     }
 
@@ -395,15 +666,35 @@ public sealed class EditorUI
         ImGui.Text($"{_session.SelectedIndex}: "); ImGui.SameLine(); ImGui.TextColored(ColAccent, sel.ClassName);
         ImGui.Separator();
 
+        if (_session.Mode == EditMode.Clip || _session.ClipPoints.Count>0)
+        {
+            if (ImGui.CollapsingHeader("Clip Tool (X)", ImGuiTreeNodeFlags.DefaultOpen))
+            {
+                ImGui.Text($"Points: {_session.ClipPoints.Count}/3");
+                for(int i=0;i<_session.ClipPoints.Count;i++) { var p=_session.ClipPoints[i]; ImGui.Text($"  {i}: {p.X:0},{p.Y:0},{p.Z:0}"); ImGui.SameLine(); if(ImGui.SmallButton($"x##cp{i}")){ _session.ClipPoints.RemoveAt(i); _recompile(); } }
+                if (_session.ClipPoints.Count>=2)
+                {
+                    if (ImGui.Button("Keep Front (Enter)")) { if(_session.ExecuteClip(true,false)) { _recompile(); SetStatus("Clipped front"); } else SetStatus("Clip failed"); }
+                    ImGui.SameLine(); if (ImGui.Button("Keep Back (Shift+Enter)")) { if(_session.ExecuteClip(false,false)) { _recompile(); SetStatus("Clipped back"); } else SetStatus("Clip failed"); }
+                    if (ImGui.Button("Split Both (Ctrl+Enter)")) { if(_session.ExecuteClip(true,true)) { _recompile(); SetStatus("Split both"); } else SetStatus("Split failed"); }
+                }
+                if (ImGui.Button("Clear Points (Esc)")) { _session.ClearClipPoints(); SetStatus("Clip cleared"); }
+                ImGui.TextDisabled("X to enter Clip, click brush surface to place points");
+            }
+        }
+
         // --- Entity -------------------------------------------------------------
         if (ImGui.CollapsingHeader("Entity", ImGuiTreeNodeFlags.DefaultOpen))
         {
+            EnsureFgd();
             string cur=sel.ClassName;
             if (ImGui.BeginCombo("Class", cur))
             {
-                foreach(var c in _knownClasses) { bool s=c==cur; if(ImGui.Selectable(c,s)){ _session.SetClassName(c); _recompile(); } if(s) ImGui.SetItemDefaultFocus(); }
+                foreach(var c in AllClassNames) { bool s=c==cur; var fgd=FindFgd(c); if(fgd!=null) ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(fgd.Color.X, fgd.Color.Y, fgd.Color.Z, 1f)); if(ImGui.Selectable(c,s)){ _session.SetClassName(c); _recompile(); } if(fgd!=null) ImGui.PopStyleColor(); if(s) ImGui.SetItemDefaultFocus(); }
                 ImGui.EndCombo();
             }
+            var curFgd=FindFgd(cur);
+            if(curFgd!=null) ImGui.TextDisabled($"{curFgd.Kind}: {curFgd.Description}");
             _classEdit=cur;
             if (ImGui.InputTextWithHint("##cls", "custom + Enter", ref _classEdit, 64, ImGuiInputTextFlags.EnterReturnsTrue) && _classEdit!=cur && !string.IsNullOrWhiteSpace(_classEdit)) { _session.SetClassName(_classEdit); _recompile(); }
 
@@ -427,6 +718,26 @@ public sealed class EditorUI
                 if(ImGui.IsItemDeactivatedAfterEdit()){ sel.Properties["angle"]=Fmt(ang); _session.RotateSelectedYaw(e-ang); _recompile(); }
             }
             if (sel.ClassName=="light") DrawLight();
+            // layer
+            string curLayer=_session.GetEntityLayer(sel);
+            if(ImGui.BeginCombo("Layer", curLayer))
+            {
+                foreach(var ly in _session.AllLayers){ bool s=ly==curLayer; if(ImGui.Selectable(ly,s)){ _session.SetEntityLayer(_session.SelectedIndex, ly); _recompile(); } if(s) ImGui.SetItemDefaultFocus(); }
+                ImGui.EndCombo();
+            }
+            string newLy=""; ImGui.SetNextItemWidth(120); if(ImGui.InputTextWithHint("##newly","New layer +Enter", ref newLy, 32, ImGuiInputTextFlags.EnterReturnsTrue) && !string.IsNullOrWhiteSpace(newLy)){ _session.SetEntityLayer(_session.SelectedIndex, newLy); _recompile(); }
+            ImGui.SameLine(); bool visCur=_session.IsLayerVisible(curLayer); if(ImGui.Checkbox("Visible", ref visCur)){ _session.SetLayerVisible(curLayer, visCur); _recompile(); }
+            if(curFgd!=null && curFgd.Properties.Count>0)
+            {
+                ImGui.TextDisabled("FGD props:");
+                foreach(var fp in curFgd.Properties)
+                {
+                    if(sel.Properties.ContainsKey(fp.Name)) continue;
+                    ImGui.SameLine();
+                    if(ImGui.SmallButton($"+{fp.Name}")){ _session.SetProperty(fp.Name, string.IsNullOrEmpty(fp.DefaultValue)? "0": fp.DefaultValue); _recompile(); }
+                    if(ImGui.IsItemHovered()) ImGui.SetTooltip($"{fp.Type}: {fp.Description}");
+                }
+            }
         }
 
         // --- Properties (key/values) — TrenchBroom style -----------------------
@@ -510,6 +821,17 @@ public sealed class EditorUI
                     }
                     else ImGui.TextDisabled("Select a brush with 6 faces to edit vertices");
                 }
+                if (_session.Mode==EditMode.Edge && _session.SelectedBrush!=null)
+                {
+                    var mids=_session.GetSelectedEdgeMidpoints();
+                    if(mids.Length==12)
+                    {
+                        int ei=_session.SelectedEdgeIndex;
+                        ImGui.Text(ei>=0? $"Edge {ei} — drag + X/Y/Z lock" : "Edge: pick yellow cross (5)");
+                        for(int i=0;i<12;i++){ bool isSel=i==ei; if(isSel) ImGui.PushStyleColor(ImGuiCol.Button, ColAccent); if(ImGui.Button($"E{i}", new Vector2(30,20))){ _session.SelectEdge(_session.SelectedIndex,_session.SelectedBrushIndex,i); _recompile(); } if(isSel) ImGui.PopStyleColor(); if(i<11) ImGui.SameLine(); }
+                        if(ei>=0){ var m=mids[ei]; ImGui.TextDisabled($"Mid {m.X:0},{m.Y:0},{m.Z:0}"); Vector3 edit=m; ImGui.SetNextItemWidth(80); if(ImGui.DragFloat("EX", ref edit.X,1,-8192,8192,"%.0f")){_session.MoveSelectedEdge(new Vector3(edit.X-m.X,0,0)); _recompile();} ImGui.SameLine(); ImGui.SetNextItemWidth(80); if(ImGui.DragFloat("EY", ref edit.Y,1,-8192,8192,"%.0f")){_session.MoveSelectedEdge(new Vector3(0,edit.Y-m.Y,0)); _recompile();} ImGui.SameLine(); ImGui.SetNextItemWidth(80); if(ImGui.DragFloat("EZ", ref edit.Z,1,-8192,8192,"%.0f")){_session.MoveSelectedEdge(new Vector3(0,0,edit.Z-m.Z)); _recompile();} }
+                    } else ImGui.TextDisabled("Box brush only");
+                }
                 for(int bi=0;bi<sel.Brushes.Count;bi++)
                 {
                     var br=sel.Brushes[bi];
@@ -542,6 +864,27 @@ public sealed class EditorUI
                         ImGui.SameLine();
                     }
                     ImGui.NewLine();
+                    // UV editing for selected face
+                    if (_session.SelectedBrush!=null && _session.SelectedFaceIndex>=0 && isSel)
+                    {
+                        var f = _session.SelectedBrush.Faces[_session.SelectedFaceIndex];
+                        ImGui.Separator(); ImGui.Text($"UV Face {_session.SelectedFaceIndex}");
+                        bool uvChanged=false;
+                        float ro=f.Rotation, sx=f.ScaleX==0?1:f.ScaleX, sy=f.ScaleY==0?1:f.ScaleY, uo=f.UOffset, vo=f.VOffset;
+                        ImGui.SetNextItemWidth(88); if(ImGui.DragFloat("Rot##uv", ref ro, 1f, -180,180,"%.0f°")) uvChanged=true;
+                        ImGui.SameLine(); ImGui.SetNextItemWidth(70); if(ImGui.DragFloat("SX##uv", ref sx, 0.05f, 0.1f,8f,"%.2f")) uvChanged=true;
+                        ImGui.SameLine(); ImGui.SetNextItemWidth(70); if(ImGui.DragFloat("SY##uv", ref sy, 0.05f, 0.1f,8f,"%.2f")) uvChanged=true;
+                        ImGui.SetNextItemWidth(88); if(ImGui.DragFloat("U##uv", ref uo, 1f, -1024,1024,"%.0f")) uvChanged=true;
+                        ImGui.SameLine(); ImGui.SetNextItemWidth(88); if(ImGui.DragFloat("V##uv", ref vo, 1f, -1024,1024,"%.0f")) uvChanged=true;
+                        ImGui.SameLine(); if(ImGui.Button("Reset UV")){ ro=0; sx=1; sy=1; uo=0; vo=0; uvChanged=true; }
+                        if(uvChanged){ f.Rotation=ro; f.ScaleX=sx; f.ScaleY=sy; f.UOffset=uo; f.VOffset=vo; _recompile(); }
+                        if(ImGui.Button("Fit")){ f.ScaleX=1; f.ScaleY=1; f.UOffset=0; f.VOffset=0; f.Rotation=0; _recompile(); }
+                        ImGui.SameLine(); if(ImGui.Button("Fit X")){ f.ScaleX=1; _recompile(); }
+                        ImGui.SameLine(); if(ImGui.Button("Fit Y")){ f.ScaleY=1; _recompile(); }
+                        float aw=64, ah=64;
+                        // texture preview color
+                        ImGui.TextDisabled($"UV: rot {f.Rotation:0}° scale {f.ScaleX:0.##}x{f.ScaleY:0.##} off {f.UOffset:0},{f.VOffset:0}");
+                    }
                     ImGui.TreePop();
                 }
             }

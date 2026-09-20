@@ -126,6 +126,7 @@ sealed class MapEditorWindow : IDisposable
     EditorGizmo _gizmo = null!;
     ImGuiController _imgui = null!;
     EditorUI _ui = null!;
+    AssetHotReload? _hotReload;
     Entity _player;
 
     SceneData _scene = new();
@@ -136,6 +137,10 @@ sealed class MapEditorWindow : IDisposable
     bool _rightDragging;
     bool _leftDragging;
     bool _middleDragging;
+    bool _baseLayoutBuilt;
+    float _autosaveTimer;
+    const float AutosaveInterval = 180f; // 3 minutes
+    const int MaxAutosaveBackups = 10;
 
     // drag state (professional — gizmo + plane)
     bool _isDraggingBrush;
@@ -150,6 +155,15 @@ sealed class MapEditorWindow : IDisposable
     bool _isDraggingVertex;
     Vector3 _vertexDragStartHit;
     Vector3 _vertexDragCurrentDelta;
+    bool _isDraggingEdge;
+    Vector3 _edgeDragStartHit;
+    Vector3 _edgeDragCurrentDelta;
+    // scale/rotate gizmo drag
+    bool _isGizmoScaling;
+    bool _isGizmoRotating;
+    Vector3 _gizmoDragStart;
+    float _gizmoRotateStartYaw;
+    Vector3 _gizmoScaleStartSize;
 
     // TrenchBroom-style brush creation (draw-to-create in Brush tool)
     bool _isCreatingBrush;
@@ -211,6 +225,7 @@ sealed class MapEditorWindow : IDisposable
         _ui = new EditorUI(_session, () => _needsRecompile = true,
             p => { try { _session.Save(p); _needsRecompile = true; _ui.SetStatus($"Saved '{p}'"); } catch (Exception ex) { _ui.SetStatus($"Save failed: {ex.Message}"); } },
             p => { try { var sc = MapCompilerService.Compile(_session.Entities, Path.GetFileNameWithoutExtension(p)); SceneSerializer.Write(sc, p); _ui.SetStatus($"Exported '{p}'"); } catch (Exception ex) { _ui.SetStatus($"Export failed: {ex.Message}"); } });
+        try{ _hotReload = new AssetHotReload(_session, ()=> _needsRecompile=true); _hotReload.Start(); }catch{}
 
         foreach (var kb in _inputCtx.Keyboards)
         {
@@ -262,6 +277,8 @@ sealed class MapEditorWindow : IDisposable
         _camCtrl.SetFromPlayer(_player, _world);
         _window.Title = $"KREAN Map Editor — {_session.FilePath ?? "(unsaved)"}";
 
+        // load editor settings (persisted)
+        try{ var s=EditorSettings.Load(_session.FilePath); s.ApplyTo(_session, _ui); Console.WriteLine($"[settings] loaded grid {s.GridSize} snap {s.GridSnapEnabled} layer {s.ActiveLayer}"); }catch{}
         // Quake style is fully owned by EditorUI.EnsureTheme — don't re-round here
         _ui.SetStatus("Brush tool (B): drag empty space to draw • click to select • RMB+WASD fly • F frame • Q select");
     }
@@ -346,8 +363,15 @@ sealed class MapEditorWindow : IDisposable
                         _ui.SetStatus($"Exported '{p}'");
                         break;
                     }
+                case Key.F12:
+                    _ui.ResetLayout(); _ui.SetStatus("Layout reset to default (Scene/Materials/2D Views)");
+                    break;
                 case Key.F9:
                     _ui.LaunchPlay();
+                    break;
+                case Key.F when ctrl:
+                    _ui.ShowSearchReport = !_ui.ShowSearchReport;
+                    _ui.SetStatus(_ui.ShowSearchReport? "Search / Entity Report (Ctrl+F)" : "Search closed");
                     break;
                 case Key.F when !ctrl && !text:
                     FrameSelection();
@@ -359,8 +383,39 @@ sealed class MapEditorWindow : IDisposable
                 case Key.R when !ctrl && !text:
                     _ui.SetStatus("Rotate: drag yaw or use inspector slider");
                     break;
+                case Key.C when ctrl && !shift:
+                    if (_session.CopySelected()) _ui.SetStatus("Copied (Ctrl+C) — Ctrl+V to paste"); else _ui.SetStatus("Copy failed — nothing selected");
+                    break;
+                case Key.X when ctrl && !alt && !shift:
+                    if (_session.CutSelected()) { _needsRecompile=true; _ui.SetStatus("Cut (Ctrl+X)"); } else _ui.SetStatus("Cut failed");
+                    break;
+                case Key.V when ctrl && !shift:
+                    if (_session.PasteAt()) { _needsRecompile=true; _ui.SetStatus("Pasted (Ctrl+V)"); } else _ui.SetStatus("Paste failed — clipboard empty");
+                    break;
+                case Key.Enter when _session.Mode==EditMode.Clip || _session.ClipPoints.Count>=2:
+                    {
+                        bool keepBoth = ctrl;
+                        bool keepFront = !shift;
+                        if (_session.ClipPoints.Count<2) { _ui.SetStatus("Clip needs 2-3 points (X + click)"); break; }
+                        // if 2 points, use view dir for plane
+                        if (_session.ClipPoints.Count==2 && ScreenToRayQuake(_lastMousePos, out _, out var vd)) {
+                            _session.TryGetClipPlaneFromView(vd, out var pp, out var nn);
+                            // replace points with derived 3rd? just execute via 2-point view path - manually set
+                            // Try view-based normal
+                            if (_session.TryGetClipPlaneFromView(vd, out var p2, out var n2)) {
+                                // temporarily add third point to make TryGetClipPlane work: we call ExecuteClip which handles 2
+                            }
+                        }
+                        if (_session.ExecuteClip(keepFront, keepBoth)) { _needsRecompile=true; _ui.SetStatus(keepBoth?"Split both (Ctrl+Enter)":"Clipped " + (keepFront?"front":"back")); }
+                        else _ui.SetStatus("Clip failed — plane didn't intersect or points collinear");
+                    }
+                    break;
+                case Key.X when !ctrl && !alt && !text:
+                    _session.Mode = EditMode.Clip; _ui.SetStatus("Clip Tool (X): click 2-3 points on brush, Enter=front Shift+Enter=back Ctrl+Enter=both Esc=cancel");
+                    break;
                 case Key.Escape:
-                    if (_isCreatingBrush) { CancelBrushCreation(); }
+                    if (_session.ClipPoints.Count>0) { _session.ClearClipPoints(); _ui.SetStatus("Clip points cleared (Esc)"); }
+                    else if (_isCreatingBrush) { CancelBrushCreation(); }
                     else if (_isDraggingVertex) { _session.Undo(); _needsRecompile = true; _isDraggingVertex = false; _dragPushedUndo = false; _ui.SetStatus("Vertex drag cancelled (Esc)"); }
                     else if (_isDraggingBrush) { _session.Undo(); _needsRecompile = true; _isDraggingBrush = false; _gizmo.Active = GizmoAxis.None; _ui.SetStatus("Drag cancelled (Esc)"); }
                     else if (_session.MultiSelectedBrushes.Count > 0) { _session.ClearMultiBrush(); _needsRecompile = true; _ui.SetStatus("Cleared multi-selection (Esc)"); }
@@ -371,8 +426,22 @@ sealed class MapEditorWindow : IDisposable
 
         if (text) return;
 
-        if (k == Key.A && shift && !ctrl && !text) { _ui.ShowArchDialog(); }
+        if (k == Key.A && shift && ctrl && !text && !_rightDragging && !_input.MouseCaptured) { _ui.ShowArchDialog(); }
 
+        // CSG shortcuts
+        if (ctrl && shift && !text)
+        {
+            if (k==Key.S){ if(_session.CsgSubtract()){ _needsRecompile=true; _ui.SetStatus("CSG Subtract"); } else _ui.SetStatus("CSG Subtract needs 2 brushes"); }
+            else if(k==Key.I){ if(_session.CsgIntersect()){ _needsRecompile=true; _ui.SetStatus("CSG Intersect"); } else _ui.SetStatus("CSG Intersect failed"); }
+            else if(k==Key.U){ if(_session.CsgUnion()){ _needsRecompile=true; _ui.SetStatus("CSG Union"); } else _ui.SetStatus("Union failed"); }
+        }
+        // gizmo mode
+        if(!text && !ctrl && !shift)
+        {
+            if(k==Key.T){ _gizmo.Mode=GizmoMode.Translate; _ui.SetStatus("Gizmo: Translate (T)"); }
+            else if(k==Key.R && !ctrl){ _gizmo.Mode=GizmoMode.Rotate; _ui.SetStatus("Gizmo: Rotate (R) — drag axis to rotate 15° snap"); }
+            else if(k==Key.Y){ _gizmo.Mode=GizmoMode.Scale; _ui.SetStatus("Gizmo: Scale (Y) — drag axis to scale"); }
+        }
         // mode / tool shortcuts (TrenchBroom-style: B = brush tool, Q = select)
         switch (k)
         {
@@ -380,10 +449,12 @@ sealed class MapEditorWindow : IDisposable
             case Key.Number2 when !ctrl: _session.Mode = EditMode.Brush; _ui.SetStatus("Tool: Brush (2/B) — drag empty space to draw, click to select"); break;
             case Key.Number3 when !ctrl: _session.Mode = EditMode.Face; _ui.SetStatus("Tool: Face (3) — pick face → arrows/wheel extrude"); break;
             case Key.Number4 when !ctrl: _session.Mode = EditMode.Vertex; _ui.SetStatus("Tool: Vertex (4) — pick corner → arrows/drag move corner"); break;
+            case Key.Number5 when !ctrl: _session.Mode = EditMode.Edge; _ui.SetStatus("Tool: Edge (5) — pick edge, drag"); break;
             case Key.B when !ctrl: _session.Mode = EditMode.Brush; _ui.SetStatus("Tool: Brush (B) — drag empty space to draw, click to select"); break;
+            case Key.E when !ctrl && !shift: _session.Mode = EditMode.Entity; _ui.SetStatus("Tool: Entity (E) — click to place. Select class in Entity palette"); break;
             case Key.Q when !ctrl && _rightDragging: break; // fly down while freelooking
             case Key.Q when !ctrl: _session.Mode = EditMode.Object; _ui.SetStatus("Tool: Select (Q) — pick + move whole entity"); break;
-            case Key.Tab when !ctrl: _session.Mode = (EditMode)(((int)_session.Mode + 1) % 4); _ui.SetStatus($"Mode: {_session.Mode} (Tab)"); break;
+            case Key.Tab when !ctrl: _session.Mode = (EditMode)(((int)_session.Mode + 1) % 7); _ui.SetStatus($"Mode: {_session.Mode} (Tab)"); break;
             case Key.Q when !ctrl && !_rightDragging && !text: /* handled as fly down in controller */ break;
             case Key.E when !ctrl && !_rightDragging && !text: break;
             case Key.G when !ctrl: _session.GridSnapEnabled = !_session.GridSnapEnabled; _ui.SetStatus($"Grid snap: {(_session.GridSnapEnabled? "ON":"OFF")} ({_session.GridSize}) — hold Shift to temp disable"); break;
@@ -484,11 +555,34 @@ sealed class MapEditorWindow : IDisposable
 
         if (_isDraggingBrush && _leftDragging) UpdateDrag();
         if (_isDraggingVertex && _leftDragging) UpdateVertexDrag();
+        if (_isDraggingEdge && _leftDragging) UpdateEdgeDrag();
         if (_isCreatingBrush && _leftDragging) UpdateBrushCreation();
         else _ghostValid = false;
 
+        // autosave / backup (every AutosaveInterval, only if dirty)
+        _autosaveTimer += d;
+        if (_autosaveTimer >= AutosaveInterval && _session.Dirty && !_isDraggingBrush && !_isDraggingVertex && !_isDraggingEdge && !_isCreatingBrush)
+        {
+            _autosaveTimer = 0f;
+            try
+            {
+                _session.SaveCopy("autosave.map");
+                string backupDir = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(_session.FilePath ?? "autosave.map")) ?? ".", "autosave_backups");
+                Directory.CreateDirectory(backupDir);
+                string stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                string baseName = Path.GetFileNameWithoutExtension(_session.FilePath ?? "autosave");
+                string backup = Path.Combine(backupDir, $"{baseName}_{stamp}.map");
+                _session.SaveCopy(backup);
+                // prune old backups
+                var files = Directory.GetFiles(backupDir, $"{baseName}_*.map").OrderBy(f=>f).ToList();
+                while(files.Count > MaxAutosaveBackups){ try{ File.Delete(files[0]); }catch{} files.RemoveAt(0); }
+                _ui.SetStatus($"Autosaved {backup} (+autosave.map)");
+                Console.WriteLine($"[autosave] {backup}");
+            } catch (Exception ex){ Console.WriteLine($"[autosave] failed: {ex.Message}"); }
+        }
+
         // any LMB cursor drag (brush/vertex/face/create) must freeze camera — left takes priority over RMB look
-        bool isDragging = _leftDragging || _isDraggingBrush || _isDraggingVertex || _isCreatingBrush;
+        bool isDragging = _leftDragging || _isDraggingBrush || _isDraggingVertex || _isDraggingEdge || _isCreatingBrush;
         var io = ImGui.GetIO();
         bool allowFly = !io.WantCaptureKeyboard && !io.WantCaptureMouse;
         bool lookActive = _rightDragging && (allowFly || !io.WantCaptureMouse);
@@ -545,6 +639,7 @@ sealed class MapEditorWindow : IDisposable
         _renderer.Render(_world, fb.X, fb.Y);
         CacheViewProj(fb.X, fb.Y);
         _selRenderer.DrawSelection(_session, _lastView, _lastProj);
+        _selRenderer.DrawClipPreview(_session, _lastView, _lastProj);
         if (_isCreatingBrush)
         {
             ComputeCreateBounds(out var cmin, out var cmax);
@@ -566,8 +661,14 @@ sealed class MapEditorWindow : IDisposable
 
         _imgui.Update((float)dt);
         var viewport = ImGui.GetMainViewport();
-        ImGui.SetNextWindowPos(viewport.Pos);
-        ImGui.SetNextWindowSize(viewport.Size);
+        float menuH = ImGui.GetFrameHeight();
+        const float toolbarH = 30f;
+        const float statusH = 20f;
+        // inset dock so toolbar/status don't cover docked panel title bars (the bug you saw)
+        Vector2 dockPos = viewport.Pos + new Vector2(0, menuH + toolbarH);
+        Vector2 dockSize = new Vector2(viewport.Size.X, Math.Max(0, viewport.Size.Y - menuH - toolbarH - statusH));
+        ImGui.SetNextWindowPos(dockPos);
+        ImGui.SetNextWindowSize(dockSize);
         ImGui.SetNextWindowViewport(viewport.ID);
         ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, 0);
         ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 0);
@@ -581,6 +682,16 @@ sealed class MapEditorWindow : IDisposable
         ImGui.PopStyleColor();
         ImGui.End();
 
+        // base layout: build dock on first run or reset
+        bool wantsReset = _ui.ResetLayoutRequested;
+        bool needBase = !_baseLayoutBuilt && !File.Exists("imgui.ini") && !File.Exists(Path.Combine(AppContext.BaseDirectory,"imgui.ini"));
+        if (wantsReset || needBase)
+        {
+            BuildBaseLayout(dockId, dockSize);
+            _baseLayoutBuilt = true;
+            if (wantsReset) _ui.ClearResetFlag();
+        }
+
         Vector3 camPos = _world.IsAlive(_player) ? _world.Get<Transform>(_player).Position : Vector3.Zero;
         _ui.Draw(new Vector2(fb.X, fb.Y), _fps, camPos, _scene.Meshes.Count, _scene.Collision.Count);
 
@@ -588,6 +699,16 @@ sealed class MapEditorWindow : IDisposable
         DrawContextHint();
 
         _imgui.Render();
+    }
+
+    void BuildBaseLayout(uint dockId, Vector2 vpSize)
+    {
+        // Base layout is defined by each window's SetNextWindowSize/Pos with ImGuiCond_FirstUseEver
+        // in EditorUI.cs (Scene Browser 320x500 left, Inspector 320x500 right,
+        // Materials 260x300, Top/Front/Side 320x260 bottom-tabbed) plus Viewport center.
+        // Clearing imgui.ini and resetting flags in EditorUI.ResetLayout() restores that.
+        // Keep this as no-op but mark built.
+        try { ImGui.LoadIniSettingsFromDisk(""); } catch {}
     }
 
     void DrawContextHint()
@@ -604,6 +725,10 @@ sealed class MapEditorWindow : IDisposable
         }
         else if (_isDraggingVertex) hint = $"Vertex {_session.SelectedVertexIndex} Δ{_vertexDragCurrentDelta.X:0.#},{_vertexDragCurrentDelta.Y:0.#},{_vertexDragCurrentDelta.Z:0.#} — drag or arrows, X/Y/Z lock, Esc cancel";
         else if (_gizmo.Hovered != GizmoAxis.None && !_isDraggingBrush) hint = $"Gizmo { _gizmo.Hovered} — drag to move (X/Y/Z lock, Shift nosnap, Alt duplicate)";
+        else if (_session.Mode == EditMode.Clip) {
+            string pts = _session.ClipPoints.Count==0? "click brush to place 1st point" : _session.ClipPoints.Count==1? "click 2nd point" : _session.ClipPoints.Count==2? "click 3rd point or Enter for 2-pt vertical" : "ready — Enter front / Shift+Enter back / Ctrl+Enter split";
+            hint = $"Clip (X): {pts} • { _session.ClipPoints.Count}/3 • Esc clear";
+        }
         else if (_isDraggingBrush) hint = $"Moving { _dragAxis}  Δ{_dragCurrentDeltaQuake.X:0.#},{_dragCurrentDeltaQuake.Y:0.#},{_dragCurrentDeltaQuake.Z:0.#}  [Shift nosnap] [X/Y/Z lock] [Esc cancel]";
         else if (_session.Mode == EditMode.Face) hint = "Face (3): LMB pick face • Drag/wheel/↑↓→←/PgUpDn to extrude • [ ] grid";
         else if (_session.Mode == EditMode.Vertex) hint = "Vertex (4): LMB pick corner • Arrows / PgUpDn move corner • X/Y/Z lock • drag";
@@ -623,6 +748,8 @@ sealed class MapEditorWindow : IDisposable
         {
             try { _session.SaveCopy("autosave.map"); Console.WriteLine("[editor] autosaved to autosave.map"); } catch { }
         }
+        try{ var s=new EditorSettings(); s.CaptureFrom(_session,_ui); s.Save(_session.FilePath); Console.WriteLine("[settings] saved"); }catch{}
+        try{ _hotReload?.Dispose(); }catch{}
         _renderer?.Dispose();
         _selRenderer?.Dispose();
         _gizmo?.Dispose();
@@ -642,7 +769,8 @@ sealed class MapEditorWindow : IDisposable
         }
 
         string name = _session.FilePath != null ? Path.GetFileNameWithoutExtension(_session.FilePath) : "map";
-        _scene = MapCompilerService.Compile(_session.Entities, name);
+        var visEnts = _session.Entities.Where(e=>_session.IsEntityVisible(e)).ToList();
+        _scene = MapCompilerService.Compile(visEnts, name);
 
         var toDestroy = _world.AllEntities().ToList();
         foreach (var e in toDestroy) _world.Destroy(e);
@@ -733,6 +861,60 @@ sealed class MapEditorWindow : IDisposable
         if (_world.IsAlive(_player)) { _savedCamPos = _world.Get<Transform>(_player).Position; var _pc = _world.Get<PlayerController>(_player); _savedYaw = _pc.Yaw; _savedPitch = _pc.Pitch; _hasCam = true; }
         void RestoreCam() { if (_hasCam && _world.IsAlive(_player)) { ref var _tr = ref _world.Get<Transform>(_player); _tr.Position = _savedCamPos; ref var _pc2 = ref _world.Get<PlayerController>(_player); _pc2.Yaw = _savedYaw; _pc2.Pitch = _savedPitch; _camCtrl.SetFromPlayer(_player, _world); _camCtrl.Freeze(); } }
 
+        // Clip tool: place points on brush surface (X mode)
+        if (_session.Mode == EditMode.Clip)
+        {
+            if (ScreenToRayQuake(_lastMousePos, out var corig, out var cdir))
+            {
+                Vector3 hitPt;
+                bool hasHit = false;
+                if (_session.TryPickBrush(corig, cdir, out _, out _, out float ct, out _))
+                { hitPt = corig + cdir * ct; hasHit = true; }
+                else if (RayHorizontalPlane(corig, cdir, 0, out var gp)) { hitPt = gp; hasHit = true; }
+                else hitPt = default;
+                if (hasHit)
+                {
+                    _session.AddClipPoint(hitPt);
+                    _ui.SetStatus($"Clip point {_session.ClipPoints.Count}/3 at {hitPt.X:0},{hitPt.Y:0},{hitPt.Z:0} — {( _session.ClipPoints.Count<2? "need 1-2 more": _session.ClipPoints.Count==2? "ready (Enter front / Shift+Enter back / Ctrl+Enter both)":"ready (Enter)")} ");
+                    RestoreCam();
+                    return;
+                }
+            }
+        }
+        // Entity tool: place point entity at hit
+        if (_session.Mode == EditMode.Entity)
+        {
+            if (ScreenToRayQuake(_lastMousePos, out var eorig, out var edir))
+            {
+                Vector3 place = eorig + edir * 256f;
+                if (_session.TryPickBrush(eorig, edir, out _, out _, out float et, out _)) place = eorig + edir * et;
+                else if (RayHorizontalPlane(eorig, edir, 0, out var ep)) place = ep;
+                // use entity filter from UI or default
+                string cls = "light";
+                // try to get from palette state? for now use info_player_start if light not selected; peek UI filter via reflection? just use light
+                // We'll read DefaultTexture hack? Instead use knownClasses first
+                var field = typeof(EditorUI).GetField("_entityFilter", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                if (field != null) { var v = field.GetValue(_ui) as string; if(!string.IsNullOrWhiteSpace(v)) cls=v; }
+                _session.AddEntity(cls, place);
+                _needsRecompile = true;
+                _ui.SetStatus($"Placed {cls} at {place.X:0},{place.Y:0},{place.Z:0} (Entity E)");
+                RestoreCam();
+                return;
+            }
+        }
+        // Edge mode: pick edge
+        if (_session.Mode == EditMode.Edge && _session.SelectedBrush != null)
+        {
+            if (ScreenToRayQuake(_lastMousePos, out var eorig2, out var edir2) && _session.TryPickEdge(eorig2, edir2, out int edgeIdx, out _))
+            {
+                _session.SelectEdge(_session.SelectedIndex, _session.SelectedBrushIndex, edgeIdx);
+                _needsRecompile = true;
+                _ui.SetStatus($"Selected edge {edgeIdx} — drag or arrows to move (5 = Edge)");
+                RestoreCam();
+                StartEdgeDrag(eorig2, edir2, edgeIdx);
+                return;
+            }
+        }
         // vertex mode: pick corner first (higher priority than gizmo)
         if (_session.Mode == EditMode.Vertex && _session.SelectedBrush != null)
         {
@@ -914,6 +1096,7 @@ sealed class MapEditorWindow : IDisposable
             _isDraggingBrush = true;
             _dragCurrentDeltaQuake = Vector3.Zero;
             _dragPushedUndo = false;
+            _session.BeginUndoGroup("move");
         }
     }
 
@@ -938,6 +1121,7 @@ sealed class MapEditorWindow : IDisposable
             _isDraggingBrush = true;
             _dragCurrentDeltaQuake = Vector3.Zero;
             _dragPushedUndo = false;
+            _session.BeginUndoGroup("move");
         }
     }
 
@@ -946,6 +1130,14 @@ sealed class MapEditorWindow : IDisposable
         if (_isCreatingBrush)
         {
             FinishBrushCreation(cancelled: false);
+        }
+        bool hadDrag = _isDraggingEdge || _isDraggingVertex || _isDraggingBrush;
+        Vector3 totalDelta = _edgeDragCurrentDelta.LengthSquared()> _vertexDragCurrentDelta.LengthSquared() ? _edgeDragCurrentDelta : _vertexDragCurrentDelta;
+        if(_dragCurrentDeltaQuake.LengthSquared()>totalDelta.LengthSquared()) totalDelta=_dragCurrentDeltaQuake;
+        if (_isDraggingEdge)
+        {
+            _isDraggingEdge=false; _dragPushedUndo=false;
+            if(_edgeDragCurrentDelta.LengthSquared()>1e-6f) _ui.SetStatus($"Moved edge {_edgeDragCurrentDelta.X:0.#},{_edgeDragCurrentDelta.Y:0.#},{_edgeDragCurrentDelta.Z:0.#}");
         }
         if (_isDraggingVertex)
         {
@@ -963,6 +1155,12 @@ sealed class MapEditorWindow : IDisposable
             if (_dragCurrentDeltaQuake.LengthSquared() > 1e-6f)
                 _ui.SetStatus($"Moved by {_dragCurrentDeltaQuake.X:0.##},{_dragCurrentDeltaQuake.Y:0.##},{_dragCurrentDeltaQuake.Z:0.##}  (grid { _session.GridSize})");
         }
+        if(hadDrag)
+        {
+            if(totalDelta.LengthSquared()>1e-6f) _session.EndUndoGroup(true);
+            else _session.EndUndoGroup(false);
+            _edgeDragCurrentDelta=Vector3.Zero; _vertexDragCurrentDelta=Vector3.Zero; _dragCurrentDeltaQuake=Vector3.Zero;
+        }
     }
 
     void StartVertexDrag(Vector3 originQ, Vector3 dirQ, int vertexIndex)
@@ -978,6 +1176,37 @@ sealed class MapEditorWindow : IDisposable
         _vertexDragCurrentDelta = Vector3.Zero;
         _isDraggingVertex = true;
         _dragPushedUndo = false;
+        _session.BeginUndoGroup("vertex");
+    }
+
+    void StartEdgeDrag(Vector3 originQ, Vector3 dirQ, int edgeIndex)
+    {
+        var mids = _session.GetSelectedEdgeMidpoints();
+        if (edgeIndex<0||edgeIndex>=mids.Length) return;
+        var pos=mids[edgeIndex];
+        _dragPlaneNormalQuake=-dirQ; _dragPlanePointQuake=pos; _edgeDragStartHit=pos;
+        if(RayPlaneIntersect(originQ, dirQ, _dragPlanePointQuake, _dragPlaneNormalQuake, out var hit)) _edgeDragStartHit=hit;
+        _edgeDragCurrentDelta=Vector3.Zero; _isDraggingEdge=true; _dragPushedUndo=false;
+        _session.BeginUndoGroup("edge");
+    }
+    void UpdateEdgeDrag()
+    {
+        if (!ScreenToRayQuake(_lastMousePos, out var originQ, out var dirQ)) return;
+        if (!RayPlaneIntersect(originQ, dirQ, _dragPlanePointQuake, _dragPlaneNormalQuake, out var curHit)) return;
+        Vector3 desiredDelta = curHit - _edgeDragStartHit;
+        bool lockX=_input.IsDown(Key.X); bool lockY=_input.IsDown(Key.Y); bool lockZ=_input.IsDown(Key.Z);
+        if(lockX) desiredDelta=new Vector3(desiredDelta.X,0,0);
+        else if(lockY) desiredDelta=new Vector3(0,desiredDelta.Y,0);
+        else if(lockZ) desiredDelta=new Vector3(0,0,desiredDelta.Z);
+        bool shiftNosnap=_input.IsDown(Key.ShiftLeft)||_input.IsDown(Key.ShiftRight);
+        if(_session.GridSnapEnabled && !shiftNosnap && _session.GridSize>0) desiredDelta=BrushManipulation.Snap(desiredDelta,_session.GridSize);
+        Vector3 inc=desiredDelta-_edgeDragCurrentDelta;
+        if(inc.LengthSquared()<1e-6f) return;
+        _edgeDragCurrentDelta=desiredDelta;
+        bool ok;
+        if(!_dragPushedUndo){ ok=_session.MoveSelectedEdge(inc,true); if(ok) _dragPushedUndo=true; else return; }
+        else ok=_session.MoveSelectedEdge(inc,false);
+        if(ok) _needsRecompile=true;
     }
 
     void UpdateDrag()
@@ -1014,6 +1243,43 @@ sealed class MapEditorWindow : IDisposable
         bool shiftNosnap = _input.IsDown(Key.ShiftLeft) || _input.IsDown(Key.ShiftRight);
         bool doSnap = _session.GridSnapEnabled && !shiftNosnap;
         if (doSnap && _session.GridSize > 0) desiredDelta = BrushManipulation.Snap(desiredDelta, _session.GridSize);
+
+        // scale/rotate gizmo handling
+        if (_gizmo.Mode==GizmoMode.Scale && _dragAxis!=GizmoAxis.None)
+        {
+            // incremental already filtered to axis, use its length as scale factor
+            Vector3 inc = desiredDelta - _dragCurrentDeltaQuake;
+            if (inc.LengthSquared()<1e-6f) return;
+            _dragCurrentDeltaQuake = desiredDelta;
+            Vector3 center = _session.GetSelectedCenter();
+            BrushManipulation.GetBounds(_session.SelectedBrush!, out var sMin, out var sMax);
+            Vector3 size = sMax - sMin; if(size.LengthSquared()<1e-4f) size=new Vector3(64,64,64);
+            Vector3 scale = new Vector3(1,1,1);
+            if(_dragAxis==GizmoAxis.X) scale.X = 1 + Vector3.Dot(inc, Vector3.UnitX) / Math.Max(size.X,8f);
+            else if(_dragAxis==GizmoAxis.Y) scale.Y = 1 + Vector3.Dot(inc, Vector3.UnitY) / Math.Max(size.Y,8f);
+            else if(_dragAxis==GizmoAxis.Z) scale.Z = 1 + Vector3.Dot(inc, Vector3.UnitZ) / Math.Max(size.Z,8f);
+            else if(_dragAxis==GizmoAxis.Screen) { float f=1+inc.Length()*0.01f; scale=new Vector3(f,f,f); }
+            if(!_dragPushedUndo){ if(_session.ScaleSelectedBrush(scale,true)) _dragPushedUndo=true; else return; }
+            else _session.ScaleSelectedBrush(scale,false);
+            _needsRecompile=true; return;
+        }
+        if (_gizmo.Mode==GizmoMode.Rotate && _dragAxis!=GizmoAxis.None)
+        {
+            Vector3 inc = desiredDelta - _dragCurrentDeltaQuake;
+            if (inc.LengthSquared()<1e-6f) return;
+            _dragCurrentDeltaQuake = desiredDelta;
+            float angle = inc.Length()*0.8f; // degrees approx
+            // determine sign via cross with view?
+            if(Vector3.Dot(inc, new Vector3(1,1,0))<0) angle=-angle;
+            Quaternion rot = Quaternion.Identity;
+            if(_dragAxis==GizmoAxis.X) rot=Quaternion.CreateFromAxisAngle(Vector3.UnitX, angle*Units.Deg2Rad);
+            else if(_dragAxis==GizmoAxis.Y) rot=Quaternion.CreateFromAxisAngle(Vector3.UnitY, angle*Units.Deg2Rad);
+            else if(_dragAxis==GizmoAxis.Z) rot=Quaternion.CreateFromAxisAngle(Vector3.UnitZ, angle*Units.Deg2Rad);
+            else rot=Quaternion.CreateFromAxisAngle(Vector3.UnitY, angle*Units.Deg2Rad);
+            if(!_dragPushedUndo){ if(_session.RotateSelectedBrush(rot,true)) _dragPushedUndo=true; else return; }
+            else _session.RotateSelectedBrush(rot,false);
+            _needsRecompile=true; return;
+        }
 
         Vector3 incremental = desiredDelta - _dragCurrentDeltaQuake;
         if (incremental.LengthSquared() < 1e-6f) return;

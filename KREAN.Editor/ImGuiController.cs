@@ -30,8 +30,29 @@ public sealed unsafe class ImGuiController : IDisposable
         io.ConfigFlags |= ImGuiConfigFlags.NavEnableKeyboard;
         io.BackendFlags |= ImGuiBackendFlags.HasMouseCursors | ImGuiBackendFlags.HasSetMousePos;
 
-        // Use modern input handling: AddKeyEvent etc (no KeyMap)
-        io.Fonts.AddFontDefault();
+        // Nuake font pack - try IBM VGA 8x16 (Quake) first, fallback to default
+        try
+        {
+            string[] fontCandidates = new[]
+            {
+                Path.Combine("assets","fonts","Nuake_IBM_VGA.ttf"),
+                Path.Combine("KREAN.Editor","assets","fonts","Nuake_IBM_VGA.ttf"),
+                Path.Combine(AppContext.BaseDirectory,"assets","fonts","Nuake_IBM_VGA.ttf"),
+                Path.Combine(AppContext.BaseDirectory,"..","..","..","KREAN.Editor","assets","fonts","Nuake_IBM_VGA.ttf"),
+                Path.Combine(Directory.GetCurrentDirectory(),"assets","fonts","Nuake_IBM_VGA.ttf"),
+                Path.Combine(Directory.GetCurrentDirectory(),"KREAN.Editor","assets","fonts","Nuake_IBM_VGA.ttf"),
+                Path.Combine("oldschool_pc_font_pack_v2.2_FULL","ttf - Px (pixel outline)","Px437_IBM_VGA_8x16.ttf"),
+                Path.Combine("oldschool_pc_font_pack_v2.2_FULL","ttf - Ac (aspect-corrected)","Ac437_IBM_VGA_8x16.ttf"),
+            };
+            string? found = fontCandidates.FirstOrDefault(File.Exists);
+            if(found!=null)
+            {
+                // 16px pixel font, slightly oversampled for readability
+                io.Fonts.AddFontFromFileTTF(found, 16f);
+                Console.WriteLine($"[font] loaded Nuake {found}");
+            }
+            else io.Fonts.AddFontDefault();
+        } catch { io.Fonts.AddFontDefault(); }
         io.FontGlobalScale = 1f;
 
         CreateDeviceObjects();

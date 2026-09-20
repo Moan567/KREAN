@@ -5,6 +5,7 @@ using Silk.NET.OpenGL;
 namespace KREAN.Editor;
 
 public enum GizmoAxis { None, X, Y, Z, XY, XZ, YZ, Screen }
+public enum GizmoMode { Translate, Rotate, Scale }
 
 /// <summary>TrenchBroom-like translate gizmo — 3 arrows + 3 plane squares, axis + plane hit test.</summary>
 public sealed class EditorGizmo : IDisposable
@@ -15,6 +16,7 @@ public sealed class EditorGizmo : IDisposable
 
     public GizmoAxis Hovered { get; private set; } = GizmoAxis.None;
     public GizmoAxis Active { get; set; } = GizmoAxis.None;
+    public GizmoMode Mode { get; set; } = GizmoMode.Translate;
     public float HandleLength { get; set; } = 1.1f; // meters
     public float PlaneSize { get; set; } = 0.28f;
     public float PickRadiusPx { get; set; } = 12f;
@@ -47,6 +49,8 @@ uniform vec3 uColor; out vec4 FragColor; void main(){ FragColor = vec4(uColor,1.
 
     public unsafe void Draw(Vector3 centerEngine, Matrix4x4 view, Matrix4x4 proj, GizmoAxis highlight = GizmoAxis.None)
     {
+        if (Mode == GizmoMode.Rotate) { DrawRotate(centerEngine, view, proj, highlight); return; }
+        if (Mode == GizmoMode.Scale) { DrawScale(centerEngine, view, proj, highlight); return; }
         var axes = new[] { (GizmoAxis.X, new Vector3(1,0,0), new Vector3(1,0.15f,0.15f)), (GizmoAxis.Y, new Vector3(0,1,0), new Vector3(0.15f,1,0.15f)), (GizmoAxis.Z, new Vector3(0,0,1), new Vector3(0.35f,0.6f,1f)) };
         _gl.UseProgram(_program);
         _gl.UniformMatrix4(_uView, 1, false, GetMat(view));
@@ -122,6 +126,83 @@ uniform vec3 uColor; out vec4 FragColor; void main(){ FragColor = vec4(uColor,1.
             };
             fixed(float* pb=box) _gl.BufferData(BufferTargetARB.ArrayBuffer, (nuint)(box.Length*sizeof(float)), pb, BufferUsageARB.DynamicDraw);
             _gl.DrawArrays(PrimitiveType.Lines, 0, 24);
+        }
+        _gl.Enable(EnableCap.DepthTest);
+        _gl.BindVertexArray(0); _gl.UseProgram(0);
+        static unsafe float* GetMat(Matrix4x4 m) => (float*)&m;
+    }
+
+    unsafe void DrawRotate(Vector3 c, Matrix4x4 view, Matrix4x4 proj, GizmoAxis hi)
+    {
+        _gl.UseProgram(_program);
+        _gl.UniformMatrix4(_uView, 1, false, GetMat(view));
+        _gl.UniformMatrix4(_uProj, 1, false, GetMat(proj));
+        _gl.BindVertexArray(_vao);
+        _gl.Disable(EnableCap.DepthTest);
+        _gl.LineWidth(2.5f);
+        foreach(var (ax, col) in new[] { (GizmoAxis.X, new Vector3(1,0.15f,0.15f)), (GizmoAxis.Y, new Vector3(0.15f,1,0.15f)), (GizmoAxis.Z, new Vector3(0.35f,0.6f,1f)) })
+        {
+            bool isHi = ax==hi || ax==Hovered || ax==Active;
+            Vector3 cc = isHi ? Vector3.One : col;
+            _gl.Uniform3(_uColor, cc.X, cc.Y, cc.Z);
+            int segs = 32;
+            var pts = new List<Vector3>();
+            float r = HandleLength * 0.9f;
+            for(int i=0;i<=segs;i++){ float a=i/(float)segs* MathF.PI*2; Vector3 p = ax==GizmoAxis.X ? new Vector3(0, MathF.Cos(a)*r, MathF.Sin(a)*r) : ax==GizmoAxis.Y ? new Vector3(MathF.Cos(a)*r,0,MathF.Sin(a)*r) : new Vector3(MathF.Cos(a)*r, MathF.Sin(a)*r,0); pts.Add(c+p); }
+            for(int i=0;i<pts.Count-1;i++){ float[] l={pts[i].X,pts[i].Y,pts[i].Z, pts[i+1].X,pts[i+1].Y,pts[i+1].Z}; fixed(float* p=l) _gl.BufferData(BufferTargetARB.ArrayBuffer, (nuint)(l.Length*sizeof(float)), p, BufferUsageARB.DynamicDraw); _gl.DrawArrays(PrimitiveType.Lines,0,2); }
+        }
+        // screen rotate circle (view-aligned)
+        {
+            bool isHi = GizmoAxis.Screen==hi || GizmoAxis.Screen==Hovered || GizmoAxis.Screen==Active;
+            _gl.Uniform3(_uColor, isHi?1:0.9f, isHi?1:0.9f, isHi?1:0.9f);
+            // approximate screen circle by using view right/up - build in world around c
+            // for simplicity draw slightly larger axis circles already cover; just draw center dot
+            float cs = HandleLength*0.08f;
+            _gl.Uniform3(_uColor, isHi?1:0.9f, isHi?1:0.9f, 0.2f);
+            // small box already drawn via translate center? add small circle hint
+        }
+        _gl.Enable(EnableCap.DepthTest);
+        _gl.BindVertexArray(0); _gl.UseProgram(0);
+        static unsafe float* GetMat(Matrix4x4 m) => (float*)&m;
+    }
+
+    unsafe void DrawScale(Vector3 centerEngine, Matrix4x4 view, Matrix4x4 proj, GizmoAxis highlight)
+    {
+        var axes = new[] { (GizmoAxis.X, new Vector3(1,0,0), new Vector3(1,0.15f,0.15f)), (GizmoAxis.Y, new Vector3(0,1,0), new Vector3(0.15f,1,0.15f)), (GizmoAxis.Z, new Vector3(0,0,1), new Vector3(0.35f,0.6f,1f)) };
+        _gl.UseProgram(_program);
+        _gl.UniformMatrix4(_uView, 1, false, GetMat(view));
+        _gl.UniformMatrix4(_uProj, 1, false, GetMat(proj));
+        _gl.BindVertexArray(_vao);
+        _gl.LineWidth(3.5f);
+        _gl.Disable(EnableCap.DepthTest);
+        foreach(var (ax, dir, col) in axes)
+        {
+            bool isHi = ax==highlight || ax==Hovered || ax==Active;
+            Vector3 cc = isHi ? Vector3.One : col;
+            _gl.Uniform3(_uColor, cc.X, cc.Y, cc.Z);
+            var l = new float[]{ centerEngine.X, centerEngine.Y, centerEngine.Z, centerEngine.X+dir.X*HandleLength, centerEngine.Y+dir.Y*HandleLength, centerEngine.Z+dir.Z*HandleLength };
+            fixed(float* p=l) _gl.BufferData(BufferTargetARB.ArrayBuffer, (nuint)(l.Length*sizeof(float)), p, BufferUsageARB.DynamicDraw);
+            _gl.DrawArrays(PrimitiveType.Lines,0,2);
+            // scale handle = wire cube larger + filled tint
+            float cs = 0.12f;
+            Vector3 ce = centerEngine + dir*HandleLength;
+            Vector3 u = dir.X>0? new Vector3(0,cs,0) : new Vector3(cs,0,0);
+            Vector3 v = dir.X>0? new Vector3(0,0,cs) : dir.Y>0? new Vector3(0,0,cs) : new Vector3(cs,0,0);
+            Vector3 p0=ce+u+v, p1=ce+u-v, p2=ce-u-v, p3=ce-u+v;
+            float[] cube = { p0.X,p0.Y,p0.Z, p1.X,p1.Y,p1.Z, p1.X,p1.Y,p1.Z, p2.X,p2.Y,p2.Z, p2.X,p2.Y,p2.Z, p3.X,p3.Y,p3.Z, p3.X,p3.Y,p3.Z, p0.X,p0.Y,p0.Z };
+            fixed(float* pc=cube) _gl.BufferData(BufferTargetARB.ArrayBuffer, (nuint)(cube.Length*sizeof(float)), pc, BufferUsageARB.DynamicDraw);
+            _gl.DrawArrays(PrimitiveType.Lines,0,8);
+            // inner fill hint
+            if(isHi){ _gl.LineWidth(2f); fixed(float* pc2=cube) _gl.BufferData(BufferTargetARB.ArrayBuffer,(nuint)(cube.Length*sizeof(float)),pc2,BufferUsageARB.DynamicDraw); _gl.DrawArrays(PrimitiveType.Lines,0,8); _gl.LineWidth(3.5f); }
+        }
+        // uniform scale center
+        {
+            bool isHi = GizmoAxis.Screen==highlight || GizmoAxis.Screen==Hovered || GizmoAxis.Screen==Active;
+            _gl.Uniform3(_uColor, isHi?1:0.8f, isHi?1:0.8f, isHi?1:0.3f);
+            float cs = HandleLength*0.14f;
+            Vector3 cc=centerEngine;
+            float[] box={ cc.X-cs,cc.Y-cs,cc.Z-cs, cc.X+cs,cc.Y-cs,cc.Z-cs, cc.X+cs,cc.Y-cs,cc.Z-cs, cc.X+cs,cc.Y+cs,cc.Z-cs, cc.X+cs,cc.Y+cs,cc.Z-cs, cc.X-cs,cc.Y+cs,cc.Z-cs, cc.X-cs,cc.Y+cs,cc.Z-cs, cc.X-cs,cc.Y-cs,cc.Z-cs, cc.X-cs,cc.Y-cs,cc.Z+cs, cc.X+cs,cc.Y-cs,cc.Z+cs, cc.X+cs,cc.Y-cs,cc.Z+cs, cc.X+cs,cc.Y+cs,cc.Z+cs, cc.X+cs,cc.Y+cs,cc.Z+cs, cc.X-cs,cc.Y+cs,cc.Z+cs, cc.X-cs,cc.Y+cs,cc.Z+cs, cc.X-cs,cc.Y-cs,cc.Z+cs, cc.X-cs,cc.Y-cs,cc.Z-cs, cc.X-cs,cc.Y-cs,cc.Z+cs, cc.X+cs,cc.Y-cs,cc.Z-cs, cc.X+cs,cc.Y-cs,cc.Z+cs, cc.X+cs,cc.Y+cs,cc.Z-cs, cc.X+cs,cc.Y+cs,cc.Z+cs, cc.X-cs,cc.Y+cs,cc.Z-cs, cc.X-cs,cc.Y+cs,cc.Z+cs };
+            fixed(float* pb=box) _gl.BufferData(BufferTargetARB.ArrayBuffer,(nuint)(box.Length*sizeof(float)),pb,BufferUsageARB.DynamicDraw); _gl.DrawArrays(PrimitiveType.Lines,0,24);
         }
         _gl.Enable(EnableCap.DepthTest);
         _gl.BindVertexArray(0); _gl.UseProgram(0);

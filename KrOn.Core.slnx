@@ -4,4 +4,5 @@
   <Project Path="KREAN.MapCompiler/KREAN.MapCompiler.csproj" />
   <Project Path="KREAN.Runtime/KREAN.Runtime.csproj" />
   <Project Path="KREAN.Editor/KREAN.Editor.csproj" />
+  <Project Path="KREAN.Tests/KREAN.Tests.csproj" />
 </Solution>

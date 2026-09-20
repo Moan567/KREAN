@@ -1,3 +1,4 @@
+using System.Numerics;
 using KREAN.Core.Scenes;
 using Silk.NET.OpenGL;
 
@@ -10,6 +11,8 @@ public sealed unsafe class GpuMesh : IDisposable
 
     public string Material { get; }
     public int IndexCount { get; }
+    public Vector3 BoundsMin { get; }
+    public Vector3 BoundsMax { get; }
 
     /// <summary>Vertex layout: position(3) normal(3) uv(2).</summary>
     public GpuMesh(GL gl, MeshData data)
@@ -17,6 +20,11 @@ public sealed unsafe class GpuMesh : IDisposable
         _gl = gl;
         Material = data.Material;
         IndexCount = data.Indices.Length;
+        // compute bounds
+        var bmin=new Vector3(float.MaxValue); var bmax=new Vector3(float.MinValue);
+        for(int i=0;i<data.Positions.Length;i+=3){ var p=new Vector3(data.Positions[i], data.Positions[i+1], data.Positions[i+2]); bmin=Vector3.Min(bmin,p); bmax=Vector3.Max(bmax,p); }
+        if(bmin.X> bmax.X){ bmin=Vector3.Zero; bmax=Vector3.Zero; }
+        BoundsMin=bmin; BoundsMax=bmax;
 
         int vertexCount = data.Positions.Length / 3;
         var vertices = new float[vertexCount * 8];

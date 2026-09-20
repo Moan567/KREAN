@@ -10,8 +10,14 @@
     <PackageReference Include="Silk.NET.OpenGL" Version="2.23.0" />
     <PackageReference Include="Silk.NET.Windowing" Version="2.23.0" />
     <PackageReference Include="Silk.NET.Input" Version="2.23.0" />
+    <PackageReference Include="StbImageSharp" Version="2.27.23" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\KREAN.Core\KREAN.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="assets\shaders\*.*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 </Project>

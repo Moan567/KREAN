@@ -98,6 +98,8 @@ void main(){ FragColor = vec4(uColor,1.0); }";
         }
         if (session.Mode == EditMode.Vertex && session.SelectedBrush != null)
             DrawVertexHandles(session, view, proj);
+        if (session.Mode == EditMode.Edge && session.SelectedBrush != null)
+            DrawEdgeHandles(session, view, proj);
         if ((session.Mode == EditMode.Brush || session.Mode == EditMode.Face) && session.SelectedBrush != null)
             DrawFaceHandles(session, view, proj);
     }
@@ -196,6 +198,35 @@ void main(){ FragColor = vec4(uColor,1.0); }";
         }
     }
 
+    void DrawEdgeHandles(MapEditorSession session, Matrix4x4 view, Matrix4x4 proj)
+    {
+        var mids=session.GetSelectedEdgeMidpoints();
+        if(mids.Length==0) return;
+        var lines=new List<Vector3>();
+        float s=Units.QuakeToMeters;
+        Vector3 ToEng(Vector3 q)=>new Vector3(q.X,q.Z,-q.Y)*s;
+        for(int i=0;i<mids.Length;i++)
+        {
+            var c=ToEng(mids[i]);
+            bool sel=i==session.SelectedEdgeIndex;
+            float r=sel?0.12f:0.06f;
+            lines.Add(c+new Vector3(-r,0,0)); lines.Add(c+new Vector3(r,0,0));
+            lines.Add(c+new Vector3(0,-r,0)); lines.Add(c+new Vector3(0,r,0));
+            lines.Add(c+new Vector3(0,0,-r)); lines.Add(c+new Vector3(0,0,r));
+        }
+        DrawLines(lines, view, proj, new Vector3(1f,0.9f,0.2f), 1.8f);
+        if(session.SelectedEdgeIndex>=0 && session.SelectedEdgeIndex<mids.Length)
+        {
+            var selLines=new List<Vector3>();
+            var sc=ToEng(mids[session.SelectedEdgeIndex]);
+            float r2=0.14f;
+            selLines.Add(sc+new Vector3(-r2,0,0)); selLines.Add(sc+new Vector3(r2,0,0));
+            selLines.Add(sc+new Vector3(0,-r2,0)); selLines.Add(sc+new Vector3(0,r2,0));
+            selLines.Add(sc+new Vector3(0,0,-r2)); selLines.Add(sc+new Vector3(0,0,r2));
+            DrawLines(selLines, view, proj, new Vector3(1,0.6f,0.15f), 2.5f);
+        }
+    }
+
     /// <summary>TrenchBroom-style live brush-creation preview (cyan box).</summary>
     public void DrawBrushPreview(Vector3 minQuake, Vector3 maxQuake, Matrix4x4 view, Matrix4x4 proj)
     {
@@ -204,6 +235,54 @@ void main(){ FragColor = vec4(uColor,1.0); }";
         var lines = new List<Vector3>();
         AddBoxLines(lines, lo, hi);
         DrawLines(lines, view, proj, new Vector3(0.3f, 0.9f, 1f), 2.2f);
+    }
+
+    public void DrawClipPreview(MapEditorSession session, Matrix4x4 view, Matrix4x4 proj)
+    {
+        if (session.ClipPoints.Count == 0) return;
+        var lines = new List<Vector3>();
+        float s = Units.QuakeToMeters;
+        Vector3 ToEng(Vector3 q) => new Vector3(q.X, q.Z, -q.Y) * s;
+        for (int i = 0; i < session.ClipPoints.Count; i++)
+        {
+            var c = ToEng(session.ClipPoints[i]);
+            float r = 0.12f;
+            lines.Add(c + new Vector3(-r,0,0)); lines.Add(c + new Vector3(r,0,0));
+            lines.Add(c + new Vector3(0,-r,0)); lines.Add(c + new Vector3(0,r,0));
+            lines.Add(c + new Vector3(0,0,-r)); lines.Add(c + new Vector3(0,0,r));
+            if (i>0)
+            {
+                var p0 = ToEng(session.ClipPoints[i-1]); var p1 = ToEng(session.ClipPoints[i]);
+                lines.Add(p0); lines.Add(p1);
+            }
+        }
+        if (session.ClipPoints.Count == 3 && session.TryGetClipPlane(out var pt, out var n))
+        {
+            var center = ToEng(pt);
+            var nEng = Vector3.Normalize(new Vector3(n.X, n.Z, -n.Y));
+            lines.Add(center); lines.Add(center + nEng * 1.5f);
+            // draw large quad for plane
+            Vector3 helper = MathF.Abs(nEng.Y) < 0.9f ? Vector3.UnitY : Vector3.UnitX;
+            Vector3 t1 = Vector3.Normalize(Vector3.Cross(nEng, helper));
+            Vector3 t2 = Vector3.Normalize(Vector3.Cross(nEng, t1));
+            float sz = 4f;
+            Vector3 p0 = center + t1*sz + t2*sz, p1 = center - t1*sz + t2*sz, p2 = center - t1*sz - t2*sz, p3 = center + t1*sz - t2*sz;
+            lines.Add(p0); lines.Add(p1); lines.Add(p1); lines.Add(p2); lines.Add(p2); lines.Add(p3); lines.Add(p3); lines.Add(p0);
+        }
+        else if (session.ClipPoints.Count == 2)
+        {
+            // line between points already added, add view-extruded preview: draw vertical bar
+            var a = ToEng(session.ClipPoints[0]); var b = ToEng(session.ClipPoints[1]);
+            var mid = (a + b) * 0.5f;
+            lines.Add(mid); lines.Add(mid + Vector3.UnitY * 1f);
+        }
+        DrawLines(lines, view, proj, new Vector3(1f, 0.25f, 0.25f), 2f);
+        if (session.ClipPoints.Count >= 2)
+        {
+            var hint = new List<Vector3>();
+            // clip plane normal preview handled above
+            DrawLines(hint, view, proj, new Vector3(1,0.3f,0.3f), 1f);
+        }
     }
 
     /// <summary>Hover ghost — where a click would place a default brush (Hammer preview).</summary>
